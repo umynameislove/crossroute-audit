@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CrossRoute-Audit per-sample audit report",
+  "description": "Minimal JSON for each sample. Raw tensors are never stored, only aggregate metrics and artifact paths.",
+  "type": "object",
+  "required": ["model", "sample_id", "target", "rank_alignment", "diagnosis", "control_status"],
+  "properties": {
+    "model": {"type": "string"},
+    "sample_id": {"type": "string"},
+    "target": {"type": "string"},
+    "rank_alignment": {"type": "object", "description": "Per-layer Spearman correlation (primary metric)."},
+    "secondary_metrics": {"type": "object", "description": "Attribution-flow gap and flow retention (secondary)."},
+    "control_status": {"type": "object", "description": "text_only / no_image / counterfactual: pass, fail, or unknown."},
+    "method_agreement": {"type": "object"},
+    "stability": {"type": "object", "description": "Effect-stability summary across seeds and repeats."},
+    "diagnosis": {"type": "string", "enum": ["false_attribution_persistence", "modality_drop", "route_break", "language_prior", "redundancy", "no_flag", "low_confidence"]},
+    "intervention_settings": {"type": "object"},
+    "attribution_settings": {"type": "object"},
+    "artifact_paths": {"type": "object"}
+  }
+}

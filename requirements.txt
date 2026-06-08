@@ -1,0 +1,13 @@
+torch
+transformers
+accelerate
+pillow
+numpy
+scipy
+captum
+jsonschema
+pyyaml
+pandas
+matplotlib
+pytest
+streamlit  # phase 2 (dashboard)

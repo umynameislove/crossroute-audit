@@ -1,0 +1,26 @@
+# Synthetic fault suite: injected ground-truth faults used to verify the
+# detector flags known errors. Each fault states what the detector must observe.
+version: 0.1
+faults:
+  - id: route_break
+    description: Block the image or text route at a known layer.
+    inject: block_route
+    params: {modality: image, layer: 6}
+    expect: Route drop and causal effect decrease around layer 6.
+  - id: modality_missing
+    description: Drop the expected modality across multiple layers.
+    inject: drop_modality
+    params: {modality: image}
+    expect: Low image causal effect across many layers (Modality Drop).
+  - id: false_attribution
+    description: Keep image attribution high while the image effect is low after controls.
+    inject: synth_attr_high_effect_low
+    expect: Low rank alignment, flagged as False Attribution Persistence under gating.
+  - id: scale_safety
+    description: Rescale attribution relative to logit units.
+    inject: rescale_units
+    expect: Rank alignment is unchanged (scale-invariant); only the gap metric moves.
+  - id: negative_control
+    description: Block an irrelevant background or padding patch.
+    inject: block_irrelevant
+    expect: Effect near zero, no serious flag raised.

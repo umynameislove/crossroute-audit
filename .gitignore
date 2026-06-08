@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+runs/*
+!runs/.gitkeep
+data/images/*
+!data/images/.gitkeep
+*.pt
+*.ckpt
+.DS_Store

@@ -1,0 +1,13 @@
+[project]
+name = "crossroute-audit"
+version = "0.0.1"
+description = "Explanation-faithfulness auditing for vision-language models."
+requires-python = ">=3.10"
+readme = "README.md"
+
+[project.scripts]
+crossroute = "crossroute_audit.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

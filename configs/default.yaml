@@ -1,0 +1,19 @@
+# Default MVP configuration. The seed is fixed for reproducibility.
+seed: 1234
+model:
+  name: blip2
+  hf_id: Salesforce/blip2-flan-t5-xl
+  device: cuda
+  attn_impl: eager          # eager attention so maps materialize for small batches
+target_token_policy: first_generated_token
+attribution:
+  primary: layer_integrated_gradients
+  ig_steps: 32
+  secondary_on_subset: attention_rollout
+metrics:
+  primary: rank_alignment   # Spearman, primary metric
+  secondary: [attribution_flow_gap, flow_retention]
+controls:
+  required: [text_only, no_image, counterfactual]
+stability:
+  repeats: 3

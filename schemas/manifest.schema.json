@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://crossroute-audit/schemas/manifest.schema.json",
+  "title": "CrossRoute-Audit sample manifest line",
+  "description": "Describes a single sample (one line) in samples.jsonl. Every line of the JSONL file must validate against this schema. The manifest is fixed before model work begins so the target definition cannot change silently during experiments.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "sample_id",
+    "image_path",
+    "question",
+    "target_answer",
+    "target_token_policy",
+    "expected_visual_dependency",
+    "text_only_answerable",
+    "control_type"
+  ],
+  "properties": {
+    "sample_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_\\-]+$",
+      "description": "Unique, stable identifier for the sample. Used as the artifact directory name."
+    },
+    "source": {
+      "type": "string",
+      "description": "Source dataset (for example vqav2, gqa, coco, custom), kept for reproducibility and citation."
+    },
+    "image_path": {
+      "type": "string",
+      "description": "Path to the clean source image, relative to the repository root."
+    },
+    "question": {
+      "type": "string",
+      "minLength": 1,
+      "description": "VQA / object-presence question. Keep it short with a clear target token; avoid open-ended phrasing."
+    },
+    "target_answer": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Target answer as text (for example yes, no, dog). Mapped to a target token id by the target-token policy."
+    },
+    "target_token_policy": {
+      "type": "string",
+      "enum": ["exact_token", "first_generated_token", "selected_candidate_logit"],
+      "description": "How the scalar target logit is selected."
+    },
+    "expected_visual_dependency": {
+      "type": "string",
+      "enum": ["high", "medium", "low", "unknown"],
+      "description": "Expected degree to which answering correctly depends on image content."
+    },
+    "text_only_answerable": {
+      "type": "string",
+      "enum": ["yes", "no", "unknown"],
+      "description": "Whether the question can be answered without the image. If yes, the sample is a language-prior candidate and is not counted as false attribution."
+    },
+    "counterfactual_image_path": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Replacement image that should flip the target. Required when control_type is counterfactual_question or when checking expected_flip."
+    },
+    "control_type": {
+      "type": "string",
+      "enum": ["clean", "masked_image", "shuffled_image", "counterfactual_question", "negative_control"],
+      "description": "Control variant for this line. clean is the primary sample."
+    },
+    "expected_flip": {
+      "type": ["boolean", "null"],
+      "default": null,
+      "description": "For counterfactual controls: whether the target is expected to flip. Compared against the measured counterfactual logit delta."
+    },
+    "label": {
+      "type": ["string", "null"],
+      "description": "Ground-truth label if available, used for synthetic faults or detector evaluation."
+    },
+    "notes": {
+      "type": "string",
+      "description": "Free-form notes: selection rationale, visual evidence, or risks."
+    }
+  }
+}
