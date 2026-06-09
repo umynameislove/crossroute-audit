@@ -45,6 +45,11 @@ python -m crossroute_audit.io.manifest data/manifest/samples.example.jsonl
 #   --controls text_only,no_image,counterfactual --out runs/dog.json
 ```
 
+## Specification
+
+The full MVP specification (task, target policy, interventions, metrics, control gates,
+artifacts, CLI) is in [`docs/SPEC.md`](docs/SPEC.md).
+
 ## Design principles
 
 - Rank alignment is the primary metric; the attribution-flow gap is secondary
