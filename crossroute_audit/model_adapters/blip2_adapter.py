@@ -205,6 +205,14 @@ class BLIP2Adapter(ModelAdapter):
         self._ensure_loaded()
         return int(self.model.config.qformer_config.num_hidden_layers)
 
+    def get_intervention_layer_count(self) -> int:
+        """Number of language-model encoder layers — the axis used by
+        ``intervene``, ``get_routing_proxy``, and per-layer causal metrics.
+        Distinct from ``get_layer_count`` (Q-Former layers).
+        """
+        self._ensure_loaded()
+        return len(self._lm_encoder_layers())
+
     def get_routing_proxy(self, inputs, layer: int):
         """Return cross-modal self-attention mass at one LM encoder layer.
 
@@ -252,6 +260,10 @@ class BLIP2Adapter(ModelAdapter):
 
     def intervene(self, inputs, layer: int, group: str, mode: str):
         """Run one deterministic LM-encoder intervention and return a scalar logit.
+
+        Callers MUST call ``get_target_logit(inputs, ...)`` on the same inputs
+        before ``intervene`` so clean and intervened logits measure the same
+        target token.
 
         ``layer`` indexes ``language_model.encoder.block`` from zero. Canonical
         groups are ``image``, ``text``, and ``negative_control``; canonical modes
