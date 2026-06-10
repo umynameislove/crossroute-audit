@@ -1,13 +1,3 @@
-torch
-transformers
-accelerate
-pillow
-numpy
-scipy
-captum
-jsonschema
-pyyaml
-pandas
-matplotlib
-pytest
-streamlit  # phase 2 (dashboard)
+# Dependencies are declared in pyproject.toml (single source of truth).
+# Install the package (editable) with dev + dashboard extras:
+-e .[dev,dashboard]

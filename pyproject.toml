@@ -4,6 +4,26 @@ version = "0.0.1"
 description = "Explanation-faithfulness auditing for vision-language models."
 requires-python = ">=3.10"
 readme = "README.md"
+license = { text = "MIT" }
+
+# Single source of truth for runtime dependencies.
+dependencies = [
+    "torch",
+    "transformers",
+    "accelerate",
+    "pillow",
+    "numpy",
+    "scipy",
+    "captum",
+    "jsonschema",
+    "pyyaml",
+    "pandas",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+dashboard = ["streamlit"]
 
 [project.scripts]
 crossroute = "crossroute_audit.cli:main"
@@ -11,3 +31,15 @@ crossroute = "crossroute_audit.cli:main"
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+# Explicit package discovery. The repo is a flat layout with several non-package
+# top-level dirs (data/, configs/, schemas/, synthetic/, scripts/, docs/, runs/),
+# so auto-discovery is ambiguous; pin discovery to the one real package.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["crossroute_audit*"]
+exclude = ["tests*", "data*", "configs*", "schemas*", "synthetic*", "scripts*", "runs*", "docs*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
