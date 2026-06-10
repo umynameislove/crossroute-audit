@@ -18,6 +18,9 @@ import torch
 from transformers import Blip2ForConditionalGeneration, Blip2Processor
 import yaml
 
+from ..instrumentation.hooks import ActivationHook, managed_forward_hook
+from ..interventions.ablation import group_positions, run_ablation
+from ..interventions.patching import run_activation_patching
 from .base import ForwardOutput, ModelAdapter, TokenGroups
 
 
@@ -28,6 +31,10 @@ _SUPPORTED_TARGET_POLICIES = {
     "first_generated_token",
     "selected_candidate_logit",
 }
+_SUPPORTED_INTERVENTION_MODES = {"ablate", "mask", "patch", "shuffle", "noop"}
+_SUPPORTED_INTERVENTION_GROUPS = {"image", "text", "negative_control"}
+_TARGET_TOKEN_ID_KEY = "_crossroute_target_token_id"
+_CORRUPT_INPUTS_KEY = "_crossroute_corrupt_inputs"
 
 
 class BLIP2Adapter(ModelAdapter):
@@ -122,11 +129,12 @@ class BLIP2Adapter(ModelAdapter):
     def get_token_groups(self, inputs) -> TokenGroups:
         """Return first-step token indices for the language-model sequence.
 
-        BLIP-2 prepends ``num_query_tokens`` projected image-query embeddings to
-        the processor's text tokens. ``image`` contains the prepended indices,
-        ``text`` contains every non-padding prompt index shifted by that image
-        prefix, ``fusion`` covers the combined image-plus-text sequence, and
-        ``answer`` is decoder position zero (the audited first token).
+        Transformers 4.57+ prepends ``num_query_tokens`` image placeholders
+        directly to ``input_ids``. BLIP-2 replaces those placeholder embeddings
+        with projected Q-Former outputs before the language model. ``image``
+        contains the placeholder positions, ``text`` contains the remaining
+        non-padding prompt positions, ``fusion`` covers all valid encoder
+        positions, and ``answer`` is decoder position zero.
         """
         self._ensure_loaded()
         input_ids = inputs.get("input_ids")
@@ -138,22 +146,48 @@ class BLIP2Adapter(ModelAdapter):
         num_query_tokens = int(self.model.config.num_query_tokens)
         attention_mask = inputs.get("attention_mask")
         if attention_mask is not None:
-            valid_length = int(attention_mask[0].sum().item())
+            valid_positions = attention_mask[0].nonzero(as_tuple=False).flatten().tolist()
         else:
-            valid_length = int(input_ids.shape[1])
-        total_length = num_query_tokens + valid_length
+            valid_positions = list(range(int(input_ids.shape[1])))
+        if len(valid_positions) < num_query_tokens:
+            raise ValueError(
+                f"input sequence has {len(valid_positions)} valid positions, fewer than "
+                f"num_query_tokens={num_query_tokens}"
+            )
+
+        image_token_id = getattr(self.model.config, "image_token_id", None)
+        if image_token_id is None:
+            image_token_id = getattr(self.model.config, "image_token_index", None)
+        if image_token_id is None:
+            image_positions = valid_positions[:num_query_tokens]
+        else:
+            image_positions = [
+                position
+                for position in valid_positions
+                if int(input_ids[0, position].item()) == int(image_token_id)
+            ]
+            if len(image_positions) != num_query_tokens:
+                raise ValueError(
+                    "processor/model image placeholder count mismatch: "
+                    f"expected {num_query_tokens}, got {len(image_positions)}"
+                )
+
+        image_position_set = set(image_positions)
+        text_positions = [
+            position for position in valid_positions if position not in image_position_set
+        ]
 
         groups = TokenGroups(
-            image=list(range(num_query_tokens)),
-            text=list(range(num_query_tokens, total_length)),
-            fusion=list(range(total_length)),
+            image=image_positions,
+            text=text_positions,
+            fusion=valid_positions,
             answer=[0],
         )
         LOGGER.debug(
-            "BLIP-2 token groups: processor_input_shape=%s combined_length=%d "
+            "BLIP-2 token groups: processor_input_shape=%s valid_length=%d "
             "image=%d text=%d fusion=%d answer=%d",
             list(input_ids.shape),
-            total_length,
+            len(valid_positions),
             len(groups.image),
             len(groups.text),
             len(groups.fusion),
@@ -162,15 +196,156 @@ class BLIP2Adapter(ModelAdapter):
         return groups
 
     def get_layer_count(self) -> int:
-        """Return the number of Q-Former encoder layers, not LM decoder layers."""
+        """Return Q-Former encoder layers, preserving the Phase 2 contract.
+
+        Phase 3 routing proxies and interventions use a separate zero-based
+        language-model encoder layer index validated against
+        ``language_model.encoder.block``.
+        """
         self._ensure_loaded()
         return int(self.model.config.qformer_config.num_hidden_layers)
 
+    def get_intervention_layer_count(self) -> int:
+        """Number of language-model encoder layers — the axis used by
+        ``intervene``, ``get_routing_proxy``, and per-layer causal metrics.
+        Distinct from ``get_layer_count`` (Q-Former layers).
+        """
+        self._ensure_loaded()
+        return len(self._lm_encoder_layers())
+
     def get_routing_proxy(self, inputs, layer: int):
-        raise NotImplementedError
+        """Return cross-modal self-attention mass at one LM encoder layer.
+
+        ``layer`` is a zero-based index into ``language_model.encoder.block``;
+        it is not a Q-Former index and is therefore independent of
+        :meth:`get_layer_count`. The scalar averages text-to-image and
+        image-to-text attention mass over batch items, heads, and query tokens.
+        """
+        self._lm_encoder_layer(layer)
+        outputs, _ = self._run_first_decode_step(inputs, capture=True)
+        language_outputs = getattr(outputs, "language_model_outputs", None)
+        attentions = getattr(language_outputs, "encoder_attentions", None)
+        if attentions is None or layer >= len(attentions) or attentions[layer] is None:
+            raise RuntimeError(
+                "language-model encoder attentions were not materialized; "
+                "load BLIP-2 with attn_implementation='eager'"
+            )
+
+        attention = attentions[layer]
+        if attention.ndim != 4:
+            raise ValueError(
+                "encoder attention must have shape [batch, heads, query, key], "
+                f"got {list(attention.shape)}"
+            )
+        groups = self.get_token_groups(inputs)
+        image_index = self._position_tensor(groups.image, attention.shape[-1], attention.device)
+        text_index = self._position_tensor(groups.text, attention.shape[-1], attention.device)
+
+        text_to_image = (
+            attention.index_select(2, text_index)
+            .index_select(3, image_index)
+            .sum(dim=-1)
+            .mean()
+        )
+        image_to_text = (
+            attention.index_select(2, image_index)
+            .index_select(3, text_index)
+            .sum(dim=-1)
+            .mean()
+        )
+        proxy = 0.5 * (text_to_image + image_to_text)
+        if not torch.isfinite(proxy):
+            raise ValueError("routing proxy is not finite")
+        return float(proxy.item())
 
     def intervene(self, inputs, layer: int, group: str, mode: str):
-        raise NotImplementedError
+        """Run one deterministic LM-encoder intervention and return a scalar logit.
+
+        Callers MUST call ``get_target_logit(inputs, ...)`` on the same inputs
+        before ``intervene`` so clean and intervened logits measure the same
+        target token.
+
+        ``layer`` indexes ``language_model.encoder.block`` from zero. Canonical
+        groups are ``image``, ``text``, and ``negative_control``; canonical modes
+        are ``ablate``, ``mask``, ``patch``, ``shuffle``, and ``noop``.
+        ``mode='negative_control'`` remains a compatibility alias for the Lane B
+        baseline and maps to padding-position ablation.
+
+        The target token is the one previously resolved by
+        :meth:`get_target_logit` on this input mapping. If no target metadata is
+        present, the clean first-generated token is used. For patching, callers
+        may attach prepared corrupt inputs under
+        ``_crossroute_corrupt_inputs``; otherwise a deterministic blank-image or
+        pad-token corruption is synthesized.
+        """
+        if mode == "negative_control":
+            group = "negative_control"
+            mode = "ablate"
+        if mode not in _SUPPORTED_INTERVENTION_MODES:
+            supported = ", ".join(sorted(_SUPPORTED_INTERVENTION_MODES))
+            raise ValueError(f"unsupported intervention mode {mode!r}; expected {supported}")
+        if group not in _SUPPORTED_INTERVENTION_GROUPS:
+            supported = ", ".join(sorted(_SUPPORTED_INTERVENTION_GROUPS))
+            raise ValueError(f"unsupported intervention group {group!r}; expected {supported}")
+        if group == "negative_control" and mode == "patch":
+            raise ValueError("patch mode requires the image or text group")
+
+        layer_module = self._lm_encoder_layer(layer)
+        target_token_id = self._intervention_target_token_id(inputs)
+
+        def run_target_logit(run_inputs) -> float:
+            _, first_step_logits = self._run_first_decode_step(run_inputs, capture=False)
+            return self._target_logit_from_id(first_step_logits, target_token_id)
+
+        if mode == "noop":
+            hook = ActivationHook("noop")
+            with managed_forward_hook(layer_module, hook):
+                return run_target_logit(inputs)
+
+        if group == "negative_control":
+            negative_inputs, positions = self._with_padding_negative_control(inputs)
+            behavior = {
+                "ablate": "zero",
+                "mask": "mean",
+                "shuffle": "shuffle",
+            }[mode]
+            hook = ActivationHook(behavior, positions=positions)
+            with managed_forward_hook(layer_module, hook):
+                return run_target_logit(negative_inputs)
+
+        if mode == "patch":
+            corrupt_inputs = inputs.get(_CORRUPT_INPUTS_KEY)
+            if corrupt_inputs is None:
+                corrupt_inputs = self._make_corrupt_inputs(inputs, group)
+            if not isinstance(corrupt_inputs, dict):
+                raise TypeError(f"{_CORRUPT_INPUTS_KEY} must contain prepared input tensors")
+            return float(
+                run_activation_patching(
+                    self,
+                    inputs,
+                    corrupt_inputs,
+                    layer_module,
+                    group,
+                    run_target_logit,
+                )
+            )
+
+        if mode in {"ablate", "mask"}:
+            method = "zero" if mode == "ablate" else "mean"
+            return float(
+                run_ablation(
+                    self,
+                    inputs,
+                    layer_module,
+                    group,
+                    method,
+                    run_target_logit,
+                )
+            )
+
+        hook = ActivationHook("shuffle", positions=group_positions(self, inputs, group))
+        with managed_forward_hook(layer_module, hook):
+            return run_target_logit(inputs)
 
     def get_target_logit(self, inputs, target_answer: str, policy: str) -> float:
         """Return one scalar logit from the first decoder step.
@@ -206,15 +381,9 @@ class BLIP2Adapter(ModelAdapter):
                 )
             token_id = int(token_ids[0])
 
-        if token_id < 0 or token_id >= first_step_logits.shape[-1]:
-            raise ValueError(
-                f"target token id {token_id} is outside vocabulary size "
-                f"{first_step_logits.shape[-1]}"
-            )
-        value = first_step_logits[0, token_id]
-        if not torch.isfinite(value):
-            raise ValueError("target logit is not finite")
-        return float(value.item())
+        value = self._target_logit_from_id(first_step_logits, token_id)
+        inputs[_TARGET_TOKEN_ID_KEY] = token_id
+        return value
 
     def run_controls(self, inputs, sample: dict) -> dict:
         raise NotImplementedError
@@ -304,6 +473,115 @@ class BLIP2Adapter(ModelAdapter):
         else:
             first_step_logits = outputs.logits[:, 0, :]
         return outputs, first_step_logits
+
+    def _lm_encoder_layers(self):
+        self._ensure_loaded()
+        language_model = getattr(self.model, "language_model", None)
+        encoder = getattr(language_model, "encoder", None)
+        layers = getattr(encoder, "block", None)
+        if layers is None:
+            raise RuntimeError(
+                "BLIP-2 language model does not expose encoder.block; "
+                "Phase 3 interventions require an encoder-decoder checkpoint such as Flan-T5"
+            )
+        return layers
+
+    def _lm_encoder_layer(self, layer: int):
+        if not isinstance(layer, int):
+            raise TypeError("layer must be an integer")
+        layers = self._lm_encoder_layers()
+        if layer < 0 or layer >= len(layers):
+            raise IndexError(
+                f"LM encoder layer {layer} is outside valid range [0, {len(layers) - 1}]"
+            )
+        return layers[layer]
+
+    def _intervention_target_token_id(self, inputs) -> int:
+        stored = inputs.get(_TARGET_TOKEN_ID_KEY)
+        if stored is not None:
+            return int(stored)
+        _, first_step_logits = self._run_first_decode_step(inputs, capture=False)
+        return int(first_step_logits[0].argmax().item())
+
+    @staticmethod
+    def _target_logit_from_id(first_step_logits, token_id: int) -> float:
+        if token_id < 0 or token_id >= first_step_logits.shape[-1]:
+            raise ValueError(
+                f"target token id {token_id} is outside vocabulary size "
+                f"{first_step_logits.shape[-1]}"
+            )
+        value = first_step_logits[0, token_id]
+        if not torch.isfinite(value):
+            raise ValueError("target logit is not finite")
+        return float(value.item())
+
+    @staticmethod
+    def _position_tensor(positions, sequence_length: int, device):
+        if not positions:
+            raise ValueError("routing proxy requires non-empty image and text groups")
+        index = torch.tensor(positions, dtype=torch.long, device=device)
+        if int(index.max().item()) >= sequence_length:
+            raise IndexError(
+                f"token position {int(index.max().item())} is outside "
+                f"attention sequence length {sequence_length}"
+            )
+        return index
+
+    @staticmethod
+    def _clone_inputs(inputs) -> dict:
+        cloned = {}
+        for key, value in inputs.items():
+            if key == _CORRUPT_INPUTS_KEY:
+                continue
+            cloned[key] = value.clone() if torch.is_tensor(value) else value
+        return cloned
+
+    def _make_corrupt_inputs(self, inputs, group: str) -> dict:
+        corrupt = self._clone_inputs(inputs)
+        if group == "image":
+            pixel_values = corrupt.get("pixel_values")
+            if pixel_values is None:
+                raise ValueError("image patching requires pixel_values")
+            corrupt["pixel_values"] = torch.zeros_like(pixel_values)
+            return corrupt
+
+        input_ids = corrupt.get("input_ids")
+        if input_ids is None:
+            raise ValueError("text patching requires input_ids")
+        pad_token_id = self.model.config.text_config.pad_token_id
+        if pad_token_id is None:
+            raise ValueError("text patching requires a language-model pad token id")
+        text_positions = group_positions(self, corrupt, "text")
+        text_index = torch.tensor(text_positions, dtype=torch.long, device=input_ids.device)
+        corrupt["input_ids"][0, text_index] = int(pad_token_id)
+        return corrupt
+
+    def _with_padding_negative_control(self, inputs) -> tuple[dict, tuple[int, ...]]:
+        padded = self._clone_inputs(inputs)
+        input_ids = padded.get("input_ids")
+        if input_ids is None or input_ids.ndim != 2:
+            raise ValueError("negative control requires batched input_ids")
+        attention_mask = padded.get("attention_mask")
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
+
+        pad_token_id = self.model.config.text_config.pad_token_id
+        if pad_token_id is None:
+            raise ValueError("negative control requires a language-model pad token id")
+        pad_ids = torch.full(
+            (input_ids.shape[0], 1),
+            int(pad_token_id),
+            dtype=input_ids.dtype,
+            device=input_ids.device,
+        )
+        pad_mask = torch.zeros(
+            (attention_mask.shape[0], 1),
+            dtype=attention_mask.dtype,
+            device=attention_mask.device,
+        )
+        padded["input_ids"] = torch.cat([input_ids, pad_ids], dim=1)
+        padded["attention_mask"] = torch.cat([attention_mask, pad_mask], dim=1)
+        return padded, (int(padded["input_ids"].shape[1] - 1),)
 
     @staticmethod
     def _batch_size(inputs) -> int:

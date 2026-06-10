@@ -225,8 +225,8 @@ def test_get_layer_count_and_token_groups_are_qformer_based():
     assert adapter.get_layer_count() == 12
     assert adapter.get_token_groups(inputs) == blip2_module.TokenGroups(
         image=[0, 1],
-        text=[2, 3, 4, 5],
-        fusion=[0, 1, 2, 3, 4, 5],
+        text=[2, 3],
+        fusion=[0, 1, 2, 3],
         answer=[0],
     )
 
