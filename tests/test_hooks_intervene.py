@@ -229,6 +229,7 @@ def test_routing_proxy_and_intervention_validation_are_lm_encoder_based():
     inputs = fake_inputs()
 
     assert adapter.get_layer_count() == 3
+    assert adapter.get_intervention_layer_count() == 2
     assert adapter.get_routing_proxy(inputs, layer=1) == pytest.approx(0.75)
     with pytest.raises(IndexError, match="LM encoder layer"):
         adapter.get_routing_proxy(inputs, layer=2)
@@ -338,4 +339,5 @@ def test_gpu_negative_control_has_near_zero_effect(gpu_case):
         group="negative_control",
         mode="ablate",
     )
-    assert abs(clean - negative) < 1e-3
+    # FP16 logits have an approximately 2e-3 ULP at this magnitude.
+    assert abs(clean - negative) < 5e-3
