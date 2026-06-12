@@ -56,7 +56,8 @@ class BLIP2Adapter(ModelAdapter):
     def prepare_inputs(self, image, question):
         """Prepare one deterministic image-question example.
 
-        ``image`` may be a filesystem path or a ``PIL.Image.Image``. Images are
+        ``image`` may be a filesystem path, a ``PIL.Image.Image``, or ``None``
+        (which zeroes the pixel values for a no-image baseline). Images are
         converted to RGB and copied before processing so caller-owned image
         objects are not mutated. Integer token tensors stay integer while
         floating image tensors are moved to the model device and dtype.
@@ -65,7 +66,8 @@ class BLIP2Adapter(ModelAdapter):
         if not isinstance(question, str) or not question.strip():
             raise ValueError("question must be a non-empty string")
 
-        pil_image = self._load_image(image)
+        zero_pixels = image is None
+        pil_image = Image.new("RGB", (224, 224), 0) if zero_pixels else self._load_image(image)
         encoded = self.processor(
             images=pil_image,
             text=question.strip(),
@@ -80,6 +82,10 @@ class BLIP2Adapter(ModelAdapter):
                 else:
                     value = value.to(device=self.device)
             prepared[key] = value
+
+        if zero_pixels and "pixel_values" in prepared:
+            # True "no image" baseline: zero the vision input.
+            prepared["pixel_values"] = torch.zeros_like(prepared["pixel_values"])
 
         LOGGER.debug(
             "Prepared BLIP-2 inputs: %s",
