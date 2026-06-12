@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CrossRoute-Audit control status artifact",
+  "description": "Control-gate output for one sample. Raw tensors are never stored, only scalar/string/null aggregate values.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sample_id", "target_answer", "which", "controls"],
+  "properties": {
+    "sample_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_\\-]+$"
+    },
+    "target_answer": {
+      "type": "string",
+      "minLength": 1
+    },
+    "which": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": ["text_only", "no_image", "counterfactual", "negative_control"]
+      }
+    },
+    "controls": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "text_only": {
+          "$ref": "#/$defs/prior_control"
+        },
+        "no_image": {
+          "$ref": "#/$defs/prior_control"
+        },
+        "counterfactual": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["delta_logit_cf", "flipped", "expected_flip"],
+          "properties": {
+            "delta_logit_cf": {
+              "type": ["number", "null"]
+            },
+            "flipped": {
+              "type": ["boolean", "null"]
+            },
+            "expected_flip": {
+              "type": ["boolean", "null"]
+            }
+          }
+        },
+        "negative_control": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["effect"],
+          "properties": {
+            "effect": {
+              "type": "number"
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "prior_control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_logit", "answerable"],
+      "properties": {
+        "target_logit": {
+          "type": "number"
+        },
+        "answerable": {
+          "type": "string",
+          "enum": ["yes", "no"]
+        }
+      }
+    }
+  }
+}
