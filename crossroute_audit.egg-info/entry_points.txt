@@ -1,0 +1,2 @@
+[console_scripts]
+crossroute = crossroute_audit.cli:main

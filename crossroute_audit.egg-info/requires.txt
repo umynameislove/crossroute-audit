@@ -1,0 +1,17 @@
+torch
+transformers
+accelerate
+pillow
+numpy
+scipy
+captum
+jsonschema
+pyyaml
+pandas
+matplotlib
+
+[dashboard]
+streamlit
+
+[dev]
+pytest
