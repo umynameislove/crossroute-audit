@@ -320,10 +320,10 @@ def test_grad_forward_matches_clean_forward_on_tiny_blip2():
         decoder_start_token_id=0,
         pad_token_id=0,
     )
-    config = Blip2Config.from_vision_qformer_text_configs(
-        vision_config,
-        qformer_config,
-        text_config,
+    config = Blip2Config(
+        vision_config=vision_config.to_dict(),
+        qformer_config=qformer_config.to_dict(),
+        text_config=text_config.to_dict(),
         num_query_tokens=2,
     )
     config.image_token_id = 63
