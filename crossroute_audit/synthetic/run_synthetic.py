@@ -12,6 +12,7 @@ FAULTS = [
     "language_prior",
     "modality_drop",
     "negative_control",
+    "route_break",
 ]
 
 
@@ -30,6 +31,7 @@ def _make_case(kind):
             {"image": {0: 1.5, 1: 1.6, 2: 1.7}},
             {"image": -0.8},
             "false_attribution_persistence",
+            None,
         )
     if kind == "language_prior":
         control_status = {
@@ -44,6 +46,7 @@ def _make_case(kind):
             {"image": {0: 1.5, 1: 1.6}},
             {"image": -0.8},
             "language_prior",
+            None,
         )
     if kind == "modality_drop":
         return (
@@ -52,6 +55,7 @@ def _make_case(kind):
             {"image": {0: 0.2, 1: 0.2, 2: 0.2, 3: 0.2}},
             {"image": 0.5},
             "modality_drop",
+            None,
         )
     if kind == "negative_control":
         control_status = {
@@ -66,6 +70,16 @@ def _make_case(kind):
             {"image": {0: 0.2, 1: 0.3, 2: 0.4}},
             {"image": 0.8},
             "low_confidence",
+            None,
+        )
+    if kind == "route_break":
+        return (
+            clean_ctrl,
+            {"image": {0: 1.0, 1: 0.9, 2: 0.2, 3: 0.2}},
+            {"image": {0: 0.2, 1: 0.3, 2: 0.4, 3: 0.5}},
+            {"image": 0.8},
+            "route_break",
+            {"image": {0: 0.9, 1: 0.8, 2: 0.2, 3: 0.2}},
         )
     raise ValueError(kind)
 
@@ -75,12 +89,20 @@ def run_synthetic_suite(out_csv) -> dict:
     rows = []
     detected = 0
     for kind in FAULTS:
-        control_status, causal, attribution, rank_alignment, expected = _make_case(kind)
+        (
+            control_status,
+            causal,
+            attribution,
+            rank_alignment,
+            expected,
+            routing_proxy,
+        ) = _make_case(kind)
         got = diagnose(
             control_status,
             causal,
             attribution,
             rank_alignment,
+            routing_proxy=routing_proxy,
         )["diagnosis"]
         ok = got == expected
         detected += int(ok)
