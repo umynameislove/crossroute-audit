@@ -63,10 +63,9 @@ class TinyBlock(nn.Module):
 class TinyLanguageModel(nn.Module):
     def __init__(self, hidden_size: int = 3, layer_count: int = 2):
         super().__init__()
-        self.encoder = SimpleNamespace(
-            block=nn.ModuleList(
-                [TinyBlock(hidden_size) for _ in range(layer_count)]
-            )
+        self.encoder = nn.Module()
+        self.encoder.block = nn.ModuleList(
+            [TinyBlock(hidden_size) for _ in range(layer_count)]
         )
 
     def forward(
@@ -224,6 +223,8 @@ def test_attribution_mass_grouping_and_full_layer_axis():
 
 def test_layer_ig_runs_on_tiny_model_without_hook_leaks():
     adapter = TinyAttributionAdapter()
+    adapter.model.language_model.half()
+    adapter._embeddings = adapter._embeddings.half()
     inputs = adapter.prepare_inputs(None, "Question?")
 
     run = layer_integrated_gradients_all_layers(
@@ -231,23 +232,28 @@ def test_layer_ig_runs_on_tiny_model_without_hook_leaks():
         inputs,
         "yes",
         "selected_candidate_logit",
-        n_steps=8,
-        internal_batch_size=2,
+        n_steps=32,
+        internal_batch_size=4,
     )
 
     assert set(run.layers) == {0, 1}
     assert run.target_token_id == 1
-    assert run.ig_steps == 8
+    assert run.ig_steps == 32
     for layer, result in run.layers.items():
         assert result.layer == layer
         assert len(result.token_attribution) == 4
         assert all(math.isfinite(value) for value in result.token_attribution)
         assert math.isfinite(result.completeness_residual)
-        assert math.isfinite(result.convergence_delta)
+        assert abs(result.convergence_delta) < 1e-4
+        assert result.completeness_residual < 1e-4
     assert all(
         len(block._forward_hooks) == 0
         for block in adapter.model.language_model.encoder.block
     )
+    assert {
+        parameter.dtype
+        for parameter in adapter.model.language_model.parameters()
+    } == {torch.float16}
 
 
 def test_attribution_artifact_and_secondary_method_share_contract():
@@ -274,6 +280,7 @@ def test_attribution_artifact_and_secondary_method_share_contract():
     assert set(secondary["image"]) == {0, 1}
     assert primary["settings"]["layer_axis"] == "language_model.encoder.block"
     assert primary["settings"]["baseline"] == "zero_lm_encoder_embeddings"
+    assert primary["settings"]["compute_dtype"] == "float32"
     assert contains_tensor(primary) is False
     assert all(
         math.isfinite(value)
@@ -290,6 +297,30 @@ def test_attribution_layer_tap_is_removed_when_forward_fails():
         with adapter.attribution_layer_output(0):
             raise RuntimeError("expected")
     assert len(block._forward_hooks) == 0
+
+
+def test_attribution_float32_restores_model_state_after_failure():
+    adapter = TinyAttributionAdapter()
+    language_model = adapter.model.language_model.half()
+
+    with pytest.raises(RuntimeError, match="expected"):
+        with adapter.attribution_float32():
+            assert {
+                parameter.dtype for parameter in language_model.parameters()
+            } == {torch.float32}
+            assert not any(
+                parameter.requires_grad
+                for parameter in language_model.parameters()
+            )
+            raise RuntimeError("expected")
+
+    assert {
+        parameter.dtype for parameter in language_model.parameters()
+    } == {torch.float16}
+    assert all(
+        parameter.requires_grad
+        for parameter in language_model.parameters()
+    )
 
 
 def test_grad_forward_matches_clean_forward_on_tiny_blip2():
@@ -414,7 +445,7 @@ def test_artifact_paths_reject_unsafe_ids_and_non_finite_json(tmp_path):
 
 
 def test_load_ig_steps_reads_project_config():
-    assert load_ig_steps() == 32
+    assert load_ig_steps() == 128
 
 
 @pytest.mark.skipif(

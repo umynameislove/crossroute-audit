@@ -10,3 +10,10 @@ data/images/*
 .DS_Store
 *.egg-info/
 *.zip
+
+# secrets / credentials (phòng ngừa)
+.env
+.env.*
+*.key
+*.pem
+secrets.*

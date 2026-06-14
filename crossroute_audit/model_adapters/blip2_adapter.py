@@ -342,7 +342,10 @@ class BLIP2Adapter(ModelAdapter):
         Unlike the clean inference path, this method never enters
         ``torch.inference_mode``. It is reserved for Captum attribution and
         returns one scalar per batch item so gradients can flow from the target
-        token through the selected LM-encoder layer.
+        token through the selected LM-encoder layer. The language model and
+        embeddings run in float32 to avoid fp16 quantization along the
+        Integrated Gradients interpolation path. Normal inference remains in
+        its original dtype.
         """
         self._ensure_loaded()
         if self.model.config.use_decoder_only_language_model:
@@ -380,9 +383,10 @@ class BLIP2Adapter(ModelAdapter):
             device=encoder_embeddings.device,
         )
 
-        with torch.enable_grad():
+        with self.attribution_float32(), torch.enable_grad():
+            float_embeddings = encoder_embeddings.to(dtype=torch.float32)
             outputs = self.model.language_model(
-                inputs_embeds=encoder_embeddings,
+                inputs_embeds=float_embeddings,
                 attention_mask=attention_mask,
                 decoder_input_ids=decoder_input_ids,
                 output_hidden_states=False,
@@ -390,11 +394,81 @@ class BLIP2Adapter(ModelAdapter):
                 return_dict=True,
                 use_cache=False,
             )
-            target_logits = outputs.logits[:, 0, target_token_id]
+            target_logits = outputs.logits[:, 0, target_token_id].to(
+                dtype=torch.float32
+            )
 
         if not bool(torch.isfinite(target_logits).all()):
             raise ValueError("differentiable target logit is not finite")
         return target_logits
+
+    @contextmanager
+    def attribution_float32(self):
+        """Temporarily run only the language model in float32.
+
+        Vision and Q-Former modules remain in their inference dtype. Nested
+        callers reuse the active conversion, and the original language-model
+        dtype is restored in ``finally`` so attribution cannot silently change
+        subsequent clean inference. Keeping one context open across all layers
+        also avoids repeated weight conversions and their VRAM churn.
+        """
+        self._ensure_loaded()
+        language_model = self.model.language_model
+        depth = int(getattr(self, "_attribution_float32_depth", 0))
+        if depth > 0:
+            self._attribution_float32_depth = depth + 1
+            try:
+                yield
+            finally:
+                self._attribution_float32_depth -= 1
+            return
+
+        parameter_dtypes = {
+            parameter.dtype
+            for parameter in language_model.parameters()
+            if parameter.is_floating_point()
+        }
+        if not parameter_dtypes:
+            raise RuntimeError(
+                "language model has no floating-point parameters for attribution"
+            )
+        if len(parameter_dtypes) != 1:
+            dtypes = ", ".join(sorted(str(dtype) for dtype in parameter_dtypes))
+            raise RuntimeError(
+                "attribution requires one language-model parameter dtype; "
+                f"found {dtypes}"
+            )
+
+        original_dtype = next(iter(parameter_dtypes))
+        parameters = tuple(language_model.parameters())
+        original_requires_grad = tuple(
+            parameter.requires_grad for parameter in parameters
+        )
+        converted = original_dtype != torch.float32
+        try:
+            if converted:
+                language_model.to(dtype=torch.float32)
+        except Exception:
+            if converted:
+                language_model.to(dtype=original_dtype)
+            raise
+
+        for parameter in parameters:
+            parameter.requires_grad_(False)
+
+        self._attribution_float32_depth = 1
+        try:
+            yield
+        finally:
+            self._attribution_float32_depth = 0
+            for parameter, requires_grad in zip(
+                parameters,
+                original_requires_grad,
+                strict=True,
+            ):
+                parameter.requires_grad_(requires_grad)
+            if converted:
+                language_model.to(dtype=original_dtype)
 
     @contextmanager
     def attribution_layer_output(self, layer: int):

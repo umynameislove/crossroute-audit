@@ -89,14 +89,21 @@ def layer_integrated_gradients(
     """
     steps = load_ig_steps() if n_steps is None else _validate_ig_steps(n_steps)
     batch_size = _validate_internal_batch_size(internal_batch_size)
-    context = _prepare_context(adapter, inputs, target_answer, policy)
-    return _attribute_layer(
+    prepared = _prepare_attribution_inputs(
         adapter,
-        context,
-        layer,
-        n_steps=steps,
-        internal_batch_size=batch_size,
+        inputs,
+        target_answer,
+        policy,
     )
+    with adapter.attribution_float32():
+        context = _prepare_context(adapter, prepared)
+        return _attribute_layer(
+            adapter,
+            context,
+            layer,
+            n_steps=steps,
+            internal_batch_size=batch_size,
+        )
 
 
 def layer_integrated_gradients_all_layers(
@@ -115,23 +122,31 @@ def layer_integrated_gradients_all_layers(
     if layer_count <= 0:
         raise ValueError("intervention layer count must be positive")
 
-    context = _prepare_context(adapter, inputs, target_answer, policy)
-    layers = {}
-    for layer in range(layer_count):
-        layers[layer] = _attribute_layer(
-            adapter,
-            context,
-            layer,
-            n_steps=steps,
-            internal_batch_size=batch_size,
-        )
-    return LayerIGRun(
-        layers=layers,
-        target_token_id=context.target_token_id,
-        target_logit=context.target_logit,
-        baseline_logit=context.baseline_logit,
-        ig_steps=steps,
+    prepared = _prepare_attribution_inputs(
+        adapter,
+        inputs,
+        target_answer,
+        policy,
     )
+    with adapter.attribution_float32():
+        context = _prepare_context(adapter, prepared)
+        layers = {}
+        for layer in range(layer_count):
+            layers[layer] = _attribute_layer(
+                adapter,
+                context,
+                layer,
+                n_steps=steps,
+                internal_batch_size=batch_size,
+            )
+        run = LayerIGRun(
+            layers=layers,
+            target_token_id=context.target_token_id,
+            target_logit=context.target_logit,
+            baseline_logit=context.baseline_logit,
+            ig_steps=steps,
+        )
+    return run
 
 
 def build_attribution_mass_result(
@@ -187,6 +202,7 @@ def build_attribution_mass_result(
         "settings": {
             "method": "layer_integrated_gradients",
             "baseline": _BASELINE_NAME,
+            "compute_dtype": "float32",
             "aggregation": "sum_abs_signed_token_attribution",
             "groups": ["image", "text"],
             "ig_steps": run.ig_steps,
@@ -257,18 +273,25 @@ def attribution_mass_for_manifest(
     return paths
 
 
-def _prepare_context(
+def _prepare_attribution_inputs(
     adapter,
     inputs,
     target_answer: str,
     policy: str,
-) -> _AttributionContext:
+) -> tuple[torch.Tensor, torch.Tensor, int]:
     prepared = adapter.prepare_attribution_inputs(inputs, target_answer, policy)
     if not isinstance(prepared, tuple) or len(prepared) != 3:
         raise TypeError(
             "prepare_attribution_inputs must return "
             "(encoder_embeddings, attention_mask, target_token_id)"
         )
+    return prepared
+
+
+def _prepare_context(
+    adapter,
+    prepared: tuple[torch.Tensor, torch.Tensor, int],
+) -> _AttributionContext:
     encoder_embeddings, attention_mask, target_token_id = prepared
     if not torch.is_tensor(encoder_embeddings) or encoder_embeddings.ndim != 3:
         raise ValueError(
@@ -282,7 +305,11 @@ def _prepare_context(
         )
     target_token_id = int(target_token_id)
 
-    clean_embeddings = encoder_embeddings.detach().requires_grad_(True)
+    clean_embeddings = (
+        encoder_embeddings.detach()
+        .to(dtype=torch.float32)
+        .requires_grad_(True)
+    )
     baseline_embeddings = torch.zeros_like(clean_embeddings)
     target_logit = _scalar_forward(
         adapter,
