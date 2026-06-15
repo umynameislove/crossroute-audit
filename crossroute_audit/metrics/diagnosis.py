@@ -1,6 +1,8 @@
 """Control-gated diagnosis policy."""
 from __future__ import annotations
 
+import math
+
 
 def diagnose(
     control_status: dict,
@@ -11,6 +13,8 @@ def diagnose(
     attr_thresh: float = 1.0,
     causal_thresh: float = 0.5,
     align_thresh: float = 0.0,
+    routing_proxy: dict | None = None,
+    route_drop_thresh: float = 0.5,
 ) -> dict:
     """Return a control-gated diagnosis for one sample."""
     reasons = []
@@ -49,6 +53,20 @@ def diagnose(
             ],
         }
 
+    route_break_layer = _route_break_layer(
+        routing_proxy,
+        img_causal,
+        route_drop_thresh,
+    )
+    if route_break_layer is not None:
+        return {
+            "diagnosis": "route_break",
+            "confidence": "low" if low_conf else "high",
+            "reasons": [
+                f"routing proxy and image causal effect drop sharply near layer {route_break_layer}"
+            ],
+        }
+
     if img_causal and sum(1 for value in img_causal.values() if value < causal_thresh) > (
         len(img_causal) * 0.7
     ):
@@ -63,3 +81,36 @@ def diagnose(
         "confidence": "low" if low_conf else "high",
         "reasons": reasons or ["no strong mismatch"],
     }
+
+
+def _route_break_layer(
+    routing_proxy: dict | None,
+    image_causal: dict,
+    drop_thresh: float,
+) -> int | None:
+    if not routing_proxy or not image_causal:
+        return None
+
+    if not math.isfinite(float(drop_thresh)) or drop_thresh <= 0:
+        raise ValueError("route_drop_thresh must be a positive finite number")
+
+    proxy_series = routing_proxy.get("image", routing_proxy)
+    proxy_drops = _sharp_drop_layers(proxy_series, drop_thresh)
+    causal_drops = _sharp_drop_layers(image_causal, drop_thresh)
+    common_layers = sorted(proxy_drops & causal_drops)
+    return common_layers[0] if common_layers else None
+
+
+def _sharp_drop_layers(series: dict, drop_thresh: float) -> set[int]:
+    items = sorted(
+        ((int(layer), float(value)) for layer, value in series.items()),
+        key=lambda item: item[0],
+    )
+    drops = set()
+    for (_, previous), (layer, current) in zip(items, items[1:]):
+        if not math.isfinite(previous) or not math.isfinite(current):
+            raise ValueError("route-break inputs must be finite")
+        baseline = max(abs(previous), 1e-12)
+        if (previous - current) / baseline >= drop_thresh:
+            drops.add(layer)
+    return drops

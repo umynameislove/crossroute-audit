@@ -87,6 +87,40 @@ def test_modality_drop_when_image_causal_effect_is_low_across_most_layers():
     }
 
 
+def test_route_break_when_routing_proxy_and_causal_drop_at_same_layer():
+    result = diagnose(
+        control_status(),
+        causal_effect={"image": {"0": 1.0, "1": 0.9, "2": 0.2, "3": 0.2}},
+        attribution={"image": {"0": 0.2, "1": 0.3, "2": 0.4, "3": 0.5}},
+        rank_alignment={"image": 0.8},
+        routing_proxy={"image": {"0": 0.9, "1": 0.8, "2": 0.2, "3": 0.2}},
+    )
+
+    assert result == {
+        "diagnosis": "route_break",
+        "confidence": "high",
+        "reasons": [
+            "routing proxy and image causal effect drop sharply near layer 2"
+        ],
+    }
+
+
+def test_route_break_requires_proxy_and_causal_to_drop_together():
+    result = diagnose(
+        control_status(),
+        causal_effect={"image": {"0": 1.0, "1": 0.95, "2": 0.9, "3": 0.85}},
+        attribution={"image": {"0": 0.2, "1": 0.3, "2": 0.4, "3": 0.5}},
+        rank_alignment={"image": 0.8},
+        routing_proxy={"image": {"0": 0.9, "1": 0.8, "2": 0.2, "3": 0.2}},
+    )
+
+    assert result == {
+        "diagnosis": "no_flag",
+        "confidence": "high",
+        "reasons": ["no strong mismatch"],
+    }
+
+
 def test_negative_control_not_clean_lowers_confidence():
     result = diagnose(
         control_status(negative_effect=0.2),

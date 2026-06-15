@@ -20,8 +20,10 @@ from __future__ import annotations
 
 from PIL import Image
 
-# Target logit still >= this fraction of the clean logit => answerable without image.
-ANSWERABLE_KEEP_RATIO = 0.5
+# The image counts as "needed" only if it adds more than this many logits to the
+# target answer. If removing the image drops the target logit by <= this margin,
+# the answer is reachable without the image (language-prior answerable).
+ANSWERABLE_DROP_MARGIN = 0.5
 # clean - counterfactual logit >= this => target considered "flipped".
 FLIP_THRESHOLD = 1.0
 
@@ -38,7 +40,7 @@ def _clean_logit(adapter, sample) -> float:
 
 
 def _answerable(logit: float, clean: float) -> str:
-    return "yes" if logit >= ANSWERABLE_KEEP_RATIO * clean else "no"
+    return "yes" if (clean - logit) <= ANSWERABLE_DROP_MARGIN else "no"
 
 
 def run_text_only(adapter, sample) -> dict:

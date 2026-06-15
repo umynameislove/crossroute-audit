@@ -301,7 +301,7 @@ def gpu_case():
     adapter = BLIP2Adapter()
     inputs = adapter.prepare_inputs(
         Image.new("RGB", (224, 224), color=(40, 100, 220)),
-        "Question: is this a blue image? Answer:",
+        "is this a blue image?",
     )
     clean = adapter.get_target_logit(inputs, "yes", "selected_candidate_logit")
     layer = len(adapter._lm_encoder_layers()) - 1

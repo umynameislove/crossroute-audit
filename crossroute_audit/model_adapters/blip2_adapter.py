@@ -35,6 +35,9 @@ _SUPPORTED_INTERVENTION_MODES = {"ablate", "mask", "patch", "shuffle", "noop"}
 _SUPPORTED_INTERVENTION_GROUPS = {"image", "text", "negative_control"}
 _TARGET_TOKEN_ID_KEY = "_crossroute_target_token_id"
 _CORRUPT_INPUTS_KEY = "_crossroute_corrupt_inputs"
+# BLIP-2 / Flan-T5 VQA prompt template. Raw questions make the model describe
+# instead of answering; this template reliably elicits a short answer token.
+_VQA_PROMPT_TEMPLATE = "Question: {question} Answer:"
 
 
 class BLIP2Adapter(ModelAdapter):
@@ -66,11 +69,18 @@ class BLIP2Adapter(ModelAdapter):
         if not isinstance(question, str) or not question.strip():
             raise ValueError("question must be a non-empty string")
 
+        question = question.strip()
+        # Wrap raw questions in the VQA template so the model answers (yes/no)
+        # rather than describing. Skip if the caller already formatted the prompt.
+        prompt = question if "Answer:" in question else _VQA_PROMPT_TEMPLATE.format(
+            question=question
+        )
+
         zero_pixels = image is None
         pil_image = Image.new("RGB", (224, 224), 0) if zero_pixels else self._load_image(image)
         encoded = self.processor(
             images=pil_image,
-            text=question.strip(),
+            text=prompt,
             return_tensors="pt",
         )
 
@@ -218,6 +228,325 @@ class BLIP2Adapter(ModelAdapter):
         """
         self._ensure_loaded()
         return len(self._lm_encoder_layers())
+
+    def prepare_attribution_inputs(
+        self,
+        inputs,
+        target_answer: str,
+        policy: str,
+    ):
+        """Build the differentiable LM-encoder inputs used by layer attribution.
+
+        The returned embedding tensor exactly matches the sequence presented to
+        the Flan-T5 encoder during a clean BLIP-2 forward pass: projected
+        Q-Former outputs replace image placeholder embeddings and text positions
+        retain the language-model token embeddings. The caller uses an all-zero
+        tensor of the same shape as the Integrated Gradients baseline.
+
+        This helper intentionally detaches the vision/Q-Former computation.
+        Phase-4 attribution is defined at LM-encoder activations, not at pixels
+        or Q-Former parameters.
+        """
+        self._ensure_loaded()
+        if self.model.config.use_decoder_only_language_model:
+            raise RuntimeError(
+                "LM-encoder attribution requires an encoder-decoder BLIP-2 "
+                "checkpoint such as Salesforce/blip2-flan-t5-xl"
+            )
+
+        pixel_values = inputs.get("pixel_values")
+        input_ids = inputs.get("input_ids")
+        if not torch.is_tensor(pixel_values):
+            raise ValueError("attribution inputs must contain pixel_values")
+        if not torch.is_tensor(input_ids) or input_ids.ndim != 2:
+            raise ValueError("attribution inputs must contain batched input_ids")
+
+        # Resolve and store the exact target token before any baseline forward.
+        self.get_target_logit(inputs, target_answer, policy)
+        target_token_id = int(inputs[_TARGET_TOKEN_ID_KEY])
+
+        attention_mask = inputs.get("attention_mask")
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
+        if not torch.is_tensor(attention_mask) or attention_mask.shape != input_ids.shape:
+            raise ValueError("attention_mask must match input_ids shape")
+
+        encoder_embeddings = self._capture_lm_encoder_embeddings(inputs)
+        return (
+            encoder_embeddings.detach().requires_grad_(True),
+            attention_mask.detach(),
+            target_token_id,
+        )
+
+    def attribution_baseline_embeddings(self, inputs):
+        """Return the on-manifold Integrated Gradients baseline embeddings.
+
+        The baseline is the LM-encoder input sequence for the same prompt with a
+        blank (all-zero pixel) image. Image-placeholder positions therefore carry
+        the Q-Former projection of a blank image while text positions are
+        unchanged. Keeping both IG endpoints on the activation manifold avoids
+        the divergent gradients an all-zero embedding baseline triggers through
+        the Flan-T5 RMSNorm, and defines attribution relative to a
+        no-visual-information reference that matches the causal image-ablation
+        intervention.
+        """
+        self._ensure_loaded()
+        pixel_values = inputs.get("pixel_values")
+        if not torch.is_tensor(pixel_values):
+            raise ValueError("attribution baseline requires pixel_values")
+        blank_inputs = dict(inputs)
+        blank_inputs["pixel_values"] = torch.zeros_like(pixel_values)
+        # Force recomputation from blank pixels; drop any cached fused embeddings.
+        blank_inputs.pop("inputs_embeds", None)
+        return self._capture_lm_encoder_embeddings(blank_inputs).detach()
+
+    def _capture_lm_encoder_embeddings(self, inputs):
+        """Capture the exact [batch, sequence, hidden] tensor BLIP-2 feeds to the
+        Flan-T5 encoder.
+
+        A forward pre-hook records the projected Q-Former features scattered into
+        image-placeholder positions, so the captured sequence is identical to the
+        clean forward pass even if the public ``get_image_features`` return shape
+        changes across Transformers versions.
+        """
+        input_ids = inputs.get("input_ids")
+        if not torch.is_tensor(input_ids) or input_ids.ndim != 2:
+            raise ValueError("attribution inputs must contain batched input_ids")
+
+        model_inputs = {
+            key: value
+            for key, value in inputs.items()
+            if key in {"pixel_values", "input_ids", "attention_mask", "inputs_embeds"}
+        }
+        start_token_id = self.model.config.text_config.decoder_start_token_id
+        if start_token_id is None:
+            start_token_id = self.model.config.text_config.pad_token_id
+        if start_token_id is None:
+            raise ValueError("decoder start token id and pad token id are both undefined")
+        model_inputs["decoder_input_ids"] = torch.full(
+            (input_ids.shape[0], 1),
+            int(start_token_id),
+            dtype=torch.long,
+            device=input_ids.device,
+        )
+
+        captured_embeddings = []
+
+        def capture_encoder_inputs(module, args, kwargs):
+            del module
+            encoder_inputs = kwargs.get("inputs_embeds")
+            if encoder_inputs is None and args:
+                encoder_inputs = args[0]
+            if not torch.is_tensor(encoder_inputs) or encoder_inputs.ndim != 3:
+                raise RuntimeError(
+                    "BLIP-2 did not pass [batch, sequence, hidden] embeddings "
+                    "to the language-model encoder"
+                )
+            captured_embeddings.append(encoder_inputs.detach())
+
+        encoder = self.model.language_model.encoder
+        handle = encoder.register_forward_pre_hook(
+            capture_encoder_inputs,
+            with_kwargs=True,
+        )
+        try:
+            # In Transformers 4.57.6, the model's own forward obtains projected
+            # Q-Former features from get_image_features(return_dict=True), then
+            # scatters them into image-placeholder token embeddings. Capturing
+            # the resulting encoder input keeps this path identical even if the
+            # helper's public return shape changes across versions.
+            with torch.no_grad(), self._capture_settings(False):
+                self.model(
+                    **model_inputs,
+                    output_hidden_states=False,
+                    output_attentions=False,
+                    return_dict=True,
+                    use_cache=False,
+                )
+        finally:
+            handle.remove()
+
+        if len(captured_embeddings) != 1:
+            raise RuntimeError(
+                "expected exactly one language-model encoder call while "
+                f"preparing attribution inputs, got {len(captured_embeddings)}"
+            )
+        encoder_embeddings = captured_embeddings[0].clone()
+        if encoder_embeddings.shape[:2] != input_ids.shape:
+            raise ValueError(
+                "LM-encoder embeddings and input_ids have inconsistent sequence shapes"
+            )
+        return encoder_embeddings
+
+    def forward_target_logit_from_embeddings(
+        self,
+        encoder_embeddings,
+        attention_mask,
+        target_token_id: int,
+    ):
+        """Return a differentiable first-step target logit for LM embeddings.
+
+        Unlike the clean inference path, this method never enters
+        ``torch.inference_mode``. It is reserved for Captum attribution and
+        returns one scalar per batch item so gradients can flow from the target
+        token through the selected LM-encoder layer. The language model and
+        embeddings run in float32 to avoid fp16 quantization along the
+        Integrated Gradients interpolation path. Normal inference remains in
+        its original dtype.
+        """
+        self._ensure_loaded()
+        if self.model.config.use_decoder_only_language_model:
+            raise RuntimeError(
+                "LM-encoder attribution requires an encoder-decoder language model"
+            )
+        if not torch.is_tensor(encoder_embeddings) or encoder_embeddings.ndim != 3:
+            raise ValueError(
+                "encoder_embeddings must have shape [batch, sequence, hidden]"
+            )
+        if not torch.is_tensor(attention_mask) or attention_mask.ndim != 2:
+            raise ValueError("attention_mask must have shape [batch, sequence]")
+        if encoder_embeddings.shape[:2] != attention_mask.shape:
+            raise ValueError(
+                "encoder_embeddings and attention_mask must share batch and sequence dimensions"
+            )
+        if not isinstance(target_token_id, int):
+            raise TypeError("target_token_id must be an integer")
+
+        vocab_size = int(self.model.config.text_config.vocab_size)
+        if target_token_id < 0 or target_token_id >= vocab_size:
+            raise ValueError(
+                f"target token id {target_token_id} is outside vocabulary size {vocab_size}"
+            )
+
+        start_token_id = self.model.config.text_config.decoder_start_token_id
+        if start_token_id is None:
+            start_token_id = self.model.config.text_config.pad_token_id
+        if start_token_id is None:
+            raise ValueError("decoder start token id and pad token id are both undefined")
+        decoder_input_ids = torch.full(
+            (encoder_embeddings.shape[0], 1),
+            int(start_token_id),
+            dtype=torch.long,
+            device=encoder_embeddings.device,
+        )
+
+        with self.attribution_float32(), torch.enable_grad():
+            float_embeddings = encoder_embeddings.to(dtype=torch.float32)
+            outputs = self.model.language_model(
+                inputs_embeds=float_embeddings,
+                attention_mask=attention_mask,
+                decoder_input_ids=decoder_input_ids,
+                output_hidden_states=False,
+                output_attentions=False,
+                return_dict=True,
+                use_cache=False,
+            )
+            target_logits = outputs.logits[:, 0, target_token_id].to(
+                dtype=torch.float32
+            )
+
+        if not bool(torch.isfinite(target_logits).all()):
+            raise ValueError("differentiable target logit is not finite")
+        return target_logits
+
+    @contextmanager
+    def attribution_float32(self):
+        """Temporarily run only the language model in float32.
+
+        Vision and Q-Former modules remain in their inference dtype. Nested
+        callers reuse the active conversion, and the original language-model
+        dtype is restored in ``finally`` so attribution cannot silently change
+        subsequent clean inference. Keeping one context open across all layers
+        also avoids repeated weight conversions and their VRAM churn.
+        """
+        self._ensure_loaded()
+        language_model = self.model.language_model
+        depth = int(getattr(self, "_attribution_float32_depth", 0))
+        if depth > 0:
+            self._attribution_float32_depth = depth + 1
+            try:
+                yield
+            finally:
+                self._attribution_float32_depth -= 1
+            return
+
+        parameter_dtypes = {
+            parameter.dtype
+            for parameter in language_model.parameters()
+            if parameter.is_floating_point()
+        }
+        if not parameter_dtypes:
+            raise RuntimeError(
+                "language model has no floating-point parameters for attribution"
+            )
+        if len(parameter_dtypes) != 1:
+            dtypes = ", ".join(sorted(str(dtype) for dtype in parameter_dtypes))
+            raise RuntimeError(
+                "attribution requires one language-model parameter dtype; "
+                f"found {dtypes}"
+            )
+
+        original_dtype = next(iter(parameter_dtypes))
+        parameters = tuple(language_model.parameters())
+        original_requires_grad = tuple(
+            parameter.requires_grad for parameter in parameters
+        )
+        converted = original_dtype != torch.float32
+        try:
+            if converted:
+                language_model.to(dtype=torch.float32)
+        except Exception:
+            if converted:
+                language_model.to(dtype=original_dtype)
+            raise
+
+        for parameter in parameters:
+            parameter.requires_grad_(False)
+
+        self._attribution_float32_depth = 1
+        try:
+            yield
+        finally:
+            self._attribution_float32_depth = 0
+            for parameter, requires_grad in zip(
+                parameters,
+                original_requires_grad,
+                strict=True,
+            ):
+                parameter.requires_grad_(requires_grad)
+            if converted:
+                language_model.to(dtype=original_dtype)
+
+    @contextmanager
+    def attribution_layer_output(self, layer: int):
+        """Expose one LM block's primary hidden-state output as a Captum layer.
+
+        T5 blocks return tuples containing hidden states and position-bias
+        tensors. Captum should attribute only the primary hidden-state tensor,
+        so a temporary identity module is inserted around that tensor. The
+        forward hook is always removed, including when attribution raises.
+        """
+        layer_module = self._lm_encoder_layer(layer)
+        tap = torch.nn.Identity()
+
+        def route_hidden_state(module, args, output):
+            del module, args
+            if torch.is_tensor(output):
+                return tap(output)
+            if isinstance(output, tuple) and output and torch.is_tensor(output[0]):
+                return (tap(output[0]), *output[1:])
+            if isinstance(output, list) and output and torch.is_tensor(output[0]):
+                return [tap(output[0]), *output[1:]]
+            raise TypeError(
+                "LM encoder layer output must be a tensor or a sequence whose "
+                "first item is a tensor"
+            )
+
+        handle = layer_module.register_forward_hook(route_hidden_state)
+        try:
+            yield tap
+        finally:
+            handle.remove()
 
     def get_routing_proxy(self, inputs, layer: int):
         """Return cross-modal self-attention mass at one LM encoder layer.

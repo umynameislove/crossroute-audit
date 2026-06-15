@@ -9,3 +9,11 @@ data/images/*
 *.ckpt
 .DS_Store
 *.egg-info/
+*.zip
+
+# secrets / credentials (phòng ngừa)
+.env
+.env.*
+*.key
+*.pem
+secrets.*

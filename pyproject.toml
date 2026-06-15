@@ -9,7 +9,7 @@ license = { text = "MIT" }
 # Single source of truth for runtime dependencies.
 dependencies = [
     "torch",
-    "transformers",
+    "transformers>=4.57,<4.58",
     "accelerate",
     "pillow",
     "numpy",
