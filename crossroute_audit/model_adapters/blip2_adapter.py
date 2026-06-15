@@ -35,6 +35,9 @@ _SUPPORTED_INTERVENTION_MODES = {"ablate", "mask", "patch", "shuffle", "noop"}
 _SUPPORTED_INTERVENTION_GROUPS = {"image", "text", "negative_control"}
 _TARGET_TOKEN_ID_KEY = "_crossroute_target_token_id"
 _CORRUPT_INPUTS_KEY = "_crossroute_corrupt_inputs"
+# BLIP-2 / Flan-T5 VQA prompt template. Raw questions make the model describe
+# instead of answering; this template reliably elicits a short answer token.
+_VQA_PROMPT_TEMPLATE = "Question: {question} Answer:"
 
 
 class BLIP2Adapter(ModelAdapter):
@@ -66,11 +69,18 @@ class BLIP2Adapter(ModelAdapter):
         if not isinstance(question, str) or not question.strip():
             raise ValueError("question must be a non-empty string")
 
+        question = question.strip()
+        # Wrap raw questions in the VQA template so the model answers (yes/no)
+        # rather than describing. Skip if the caller already formatted the prompt.
+        prompt = question if "Answer:" in question else _VQA_PROMPT_TEMPLATE.format(
+            question=question
+        )
+
         zero_pixels = image is None
         pil_image = Image.new("RGB", (224, 224), 0) if zero_pixels else self._load_image(image)
         encoded = self.processor(
             images=pil_image,
-            text=question.strip(),
+            text=prompt,
             return_tensors="pt",
         )
 

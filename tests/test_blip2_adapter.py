@@ -239,7 +239,7 @@ def test_blip2_gpu_smoke_forward_and_target_logit():
     adapter = BLIP2Adapter()
     inputs = adapter.prepare_inputs(
         Image.new("RGB", (224, 224), color=(120, 160, 200)),
-        "Question: is this a blue image? Answer:",
+        "is this a blue image?",
     )
 
     result = adapter.forward(inputs, capture=True)

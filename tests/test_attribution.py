@@ -461,7 +461,7 @@ def test_blip2_gpu_attribution_mass_has_full_layer_axis():
     adapter = BLIP2Adapter()
     inputs = adapter.prepare_inputs(
         Image.new("RGB", (224, 224), color=(40, 100, 220)),
-        "Question: is this a blue image? Answer:",
+        "is this a blue image?",
     )
 
     result = build_attribution_mass_result(
