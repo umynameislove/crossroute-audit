@@ -8,7 +8,7 @@ model:
 target_token_policy: first_generated_token
 attribution:
   primary: layer_integrated_gradients
-  ig_steps: 128
+  ig_steps: 32
   secondary_on_subset: attention_rollout
 metrics:
   primary: rank_alignment   # Spearman, primary metric

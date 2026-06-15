@@ -261,6 +261,48 @@ class BLIP2Adapter(ModelAdapter):
         if not torch.is_tensor(attention_mask) or attention_mask.shape != input_ids.shape:
             raise ValueError("attention_mask must match input_ids shape")
 
+        encoder_embeddings = self._capture_lm_encoder_embeddings(inputs)
+        return (
+            encoder_embeddings.detach().requires_grad_(True),
+            attention_mask.detach(),
+            target_token_id,
+        )
+
+    def attribution_baseline_embeddings(self, inputs):
+        """Return the on-manifold Integrated Gradients baseline embeddings.
+
+        The baseline is the LM-encoder input sequence for the same prompt with a
+        blank (all-zero pixel) image. Image-placeholder positions therefore carry
+        the Q-Former projection of a blank image while text positions are
+        unchanged. Keeping both IG endpoints on the activation manifold avoids
+        the divergent gradients an all-zero embedding baseline triggers through
+        the Flan-T5 RMSNorm, and defines attribution relative to a
+        no-visual-information reference that matches the causal image-ablation
+        intervention.
+        """
+        self._ensure_loaded()
+        pixel_values = inputs.get("pixel_values")
+        if not torch.is_tensor(pixel_values):
+            raise ValueError("attribution baseline requires pixel_values")
+        blank_inputs = dict(inputs)
+        blank_inputs["pixel_values"] = torch.zeros_like(pixel_values)
+        # Force recomputation from blank pixels; drop any cached fused embeddings.
+        blank_inputs.pop("inputs_embeds", None)
+        return self._capture_lm_encoder_embeddings(blank_inputs).detach()
+
+    def _capture_lm_encoder_embeddings(self, inputs):
+        """Capture the exact [batch, sequence, hidden] tensor BLIP-2 feeds to the
+        Flan-T5 encoder.
+
+        A forward pre-hook records the projected Q-Former features scattered into
+        image-placeholder positions, so the captured sequence is identical to the
+        clean forward pass even if the public ``get_image_features`` return shape
+        changes across Transformers versions.
+        """
+        input_ids = inputs.get("input_ids")
+        if not torch.is_tensor(input_ids) or input_ids.ndim != 2:
+            raise ValueError("attribution inputs must contain batched input_ids")
+
         model_inputs = {
             key: value
             for key, value in inputs.items()
@@ -320,16 +362,11 @@ class BLIP2Adapter(ModelAdapter):
                 f"preparing attribution inputs, got {len(captured_embeddings)}"
             )
         encoder_embeddings = captured_embeddings[0].clone()
-
         if encoder_embeddings.shape[:2] != input_ids.shape:
             raise ValueError(
                 "LM-encoder embeddings and input_ids have inconsistent sequence shapes"
             )
-        return (
-            encoder_embeddings.detach().requires_grad_(True),
-            attention_mask.detach(),
-            target_token_id,
-        )
+        return encoder_embeddings
 
     def forward_target_logit_from_embeddings(
         self,

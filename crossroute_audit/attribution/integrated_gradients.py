@@ -21,7 +21,7 @@ from crossroute_audit.metrics.attribution_mass import attribution_mass_by_layer
 
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "default.yaml"
 _SAFE_SAMPLE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
-_BASELINE_NAME = "zero_lm_encoder_embeddings"
+_BASELINE_NAME = "blank_image_lm_encoder_embeddings"
 _LAYER_AXIS_NAME = "language_model.encoder.block"
 
 
@@ -51,6 +51,7 @@ class _AttributionContext:
     """Internal tensor context. It is never returned or serialized."""
 
     encoder_embeddings: torch.Tensor
+    baseline_embeddings: torch.Tensor
     attention_mask: torch.Tensor
     target_token_id: int
     target_logit: float
@@ -95,8 +96,9 @@ def layer_integrated_gradients(
         target_answer,
         policy,
     )
+    baseline_embeddings = adapter.attribution_baseline_embeddings(inputs)
     with adapter.attribution_float32():
-        context = _prepare_context(adapter, prepared)
+        context = _prepare_context(adapter, prepared, baseline_embeddings)
         return _attribute_layer(
             adapter,
             context,
@@ -128,8 +130,9 @@ def layer_integrated_gradients_all_layers(
         target_answer,
         policy,
     )
+    baseline_embeddings = adapter.attribution_baseline_embeddings(inputs)
     with adapter.attribution_float32():
-        context = _prepare_context(adapter, prepared)
+        context = _prepare_context(adapter, prepared, baseline_embeddings)
         layers = {}
         for layer in range(layer_count):
             layers[layer] = _attribute_layer(
@@ -291,6 +294,7 @@ def _prepare_attribution_inputs(
 def _prepare_context(
     adapter,
     prepared: tuple[torch.Tensor, torch.Tensor, int],
+    baseline_embeddings_raw: torch.Tensor,
 ) -> _AttributionContext:
     encoder_embeddings, attention_mask, target_token_id = prepared
     if not torch.is_tensor(encoder_embeddings) or encoder_embeddings.ndim != 3:
@@ -310,7 +314,10 @@ def _prepare_context(
         .to(dtype=torch.float32)
         .requires_grad_(True)
     )
-    baseline_embeddings = torch.zeros_like(clean_embeddings)
+    baseline_embeddings = _validated_baseline(
+        baseline_embeddings_raw,
+        clean_embeddings,
+    )
     target_logit = _scalar_forward(
         adapter,
         clean_embeddings,
@@ -325,11 +332,29 @@ def _prepare_context(
     )
     return _AttributionContext(
         encoder_embeddings=clean_embeddings,
+        baseline_embeddings=baseline_embeddings,
         attention_mask=attention_mask.detach(),
         target_token_id=target_token_id,
         target_logit=target_logit,
         baseline_logit=baseline_logit,
     )
+
+
+def _validated_baseline(
+    baseline: torch.Tensor,
+    clean_embeddings: torch.Tensor,
+) -> torch.Tensor:
+    """Validate and cast the on-manifold IG baseline to the clean-input shape."""
+    if not torch.is_tensor(baseline) or baseline.ndim != 3:
+        raise ValueError(
+            "attribution baseline must have shape [batch, sequence, hidden]"
+        )
+    if baseline.shape != clean_embeddings.shape:
+        raise ValueError(
+            "attribution baseline must match clean embedding shape "
+            f"{list(clean_embeddings.shape)}, got {list(baseline.shape)}"
+        )
+    return baseline.detach().to(dtype=torch.float32)
 
 
 def _attribute_layer(
@@ -349,7 +374,7 @@ def _attribute_layer(
         )
 
     encoder_embeddings = context.encoder_embeddings.detach().requires_grad_(True)
-    baseline_embeddings = torch.zeros_like(encoder_embeddings)
+    baseline_embeddings = context.baseline_embeddings.detach()
     with adapter.attribution_layer_output(layer) as attribution_layer:
         algorithm = LayerIntegratedGradients(
             adapter.forward_target_logit_from_embeddings,

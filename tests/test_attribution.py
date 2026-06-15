@@ -144,6 +144,11 @@ class TinyAttributionAdapter(BLIP2Adapter):
             1,
         )
 
+    def attribution_baseline_embeddings(self, inputs):
+        # The tiny linear/tanh stack has no normalization divergence, so the
+        # all-zero baseline keeps exact IG completeness for these contract tests.
+        return torch.zeros_like(inputs["encoder_embeddings"])
+
     def get_token_groups(self, inputs):
         del inputs
         return TokenGroups(
@@ -279,7 +284,7 @@ def test_attribution_artifact_and_secondary_method_share_contract():
     assert set(primary["attribution_mass"]["image"]) == {"0", "1"}
     assert set(secondary["image"]) == {0, 1}
     assert primary["settings"]["layer_axis"] == "language_model.encoder.block"
-    assert primary["settings"]["baseline"] == "zero_lm_encoder_embeddings"
+    assert primary["settings"]["baseline"] == "blank_image_lm_encoder_embeddings"
     assert primary["settings"]["compute_dtype"] == "float32"
     assert contains_tensor(primary) is False
     assert all(
@@ -445,7 +450,7 @@ def test_artifact_paths_reject_unsafe_ids_and_non_finite_json(tmp_path):
 
 
 def test_load_ig_steps_reads_project_config():
-    assert load_ig_steps() == 128
+    assert load_ig_steps() == 32
 
 
 @pytest.mark.skipif(
