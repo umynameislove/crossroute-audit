@@ -21,7 +21,7 @@ def test_results_table_returns_markdown_summary():
         [
             "| sample | diagnosis | rank_align(image) | rank_align(text) |",
             "|---|---|---|---|",
-            "| sample_001 | false_attribution_persistence | -1.0 | 1.0 |",
+            "| sample_001 | false_attribution_persistence | -1.000 | 1.000 |",
             "| sample_002 | language_prior | None | None |",
         ]
     )

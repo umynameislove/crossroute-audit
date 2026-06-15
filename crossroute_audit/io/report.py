@@ -9,6 +9,8 @@ def _norm(series: dict):
     """Return z-scored values sorted by numeric layer key."""
     layers = sorted(series, key=lambda layer: int(layer))
     values = [series[layer] for layer in layers]
+    if not values:
+        return layers, []
     mean = statistics.mean(values)
     std = statistics.pstdev(values) or 1.0
     return layers, [(value - mean) / std for value in values]
@@ -53,6 +55,15 @@ def plot_image_route_alignment(
     plt.close(fig)
 
 
+def _fmt(value):
+    """Render a Spearman value: 3-decimal float, or the raw value when undefined."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return f"{value:.3f}"
+    return value
+
+
 def results_table(audit_reports: list[dict]) -> str:
     """Return a markdown summary table from audit-report payloads."""
     lines = [
@@ -63,6 +74,6 @@ def results_table(audit_reports: list[dict]) -> str:
         rank_alignment = report.get("rank_alignment", {})
         lines.append(
             f"| {report['sample_id']} | {report['diagnosis']['diagnosis']} | "
-            f"{rank_alignment.get('image')} | {rank_alignment.get('text')} |"
+            f"{_fmt(rank_alignment.get('image'))} | {_fmt(rank_alignment.get('text'))} |"
         )
     return "\n".join(lines)
