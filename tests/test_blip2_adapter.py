@@ -174,7 +174,7 @@ def test_prepare_inputs_accepts_pil_and_path(tmp_path):
 
     from_pil = adapter.prepare_inputs(source, " Is there an object? ")
     assert adapter.processor.last_image.mode == "RGB"
-    assert adapter.processor.last_text == "Is there an object?"
+    assert adapter.processor.last_text == "Question: Is there an object? Answer:"
     assert from_pil["pixel_values"].dtype is torch.float16
 
     from_path = adapter.prepare_inputs(image_path, "What is shown?")
