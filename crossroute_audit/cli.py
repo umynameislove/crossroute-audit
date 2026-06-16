@@ -3,9 +3,10 @@
 Commands:
     crossroute audit    --model blip2 --image sample.jpg --question "Is there a dog?" \
                         --target yes --controls text_only,no_image,counterfactual --out result.json
-    crossroute batch    --manifest samples.jsonl --out runs/mvp_blip2/
-    crossroute validate --suite synthetic_faults.yaml --out validation/
-    crossroute report   --run validation/ --out report.md
+    crossroute batch    --manifest samples.jsonl --control-dir runs/control \
+                        --causal-dir runs/causal --attr-dir runs/attr --out runs/audit/
+    crossroute validate --out validation/ --n 40
+    crossroute report   --run runs/audit/ --out report.md
 """
 from __future__ import annotations
 
@@ -17,15 +18,47 @@ def cmd_audit(args):
 
 
 def cmd_batch(args):
-    raise NotImplementedError("batch: run the audit across a manifest")
+    from crossroute_audit.io.audit_report import audit_report_for_manifest
+
+    paths = audit_report_for_manifest(
+        args.manifest,
+        args.control_dir,
+        args.causal_dir,
+        args.attr_dir,
+        args.out,
+    )
+    print(f"wrote {len(paths)} audit reports -> {args.out}")
+    return 0
 
 
 def cmd_validate(args):
-    raise NotImplementedError("validate: run the synthetic fault suite")
+    from pathlib import Path
+
+    from crossroute_audit.synthetic.benchmark import run_benchmark
+
+    summary = run_benchmark(Path(args.out) / "benchmark.csv", n_per_fault=args.n)
+    print(
+        f"validate: accuracy={summary['accuracy']:.3f} over {summary['total']} cases "
+        f"-> {args.out}/benchmark.csv"
+    )
+    return 0
 
 
 def cmd_report(args):
-    raise NotImplementedError("report: summarize a run into a short report")
+    import glob
+    import json
+    from pathlib import Path
+
+    from crossroute_audit.io.report import results_table
+
+    files = sorted(glob.glob(str(Path(args.run) / "audit_report_*.json")))
+    reports = [json.loads(Path(path).read_text(encoding="utf-8")) for path in files]
+    markdown = results_table(reports)
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(markdown + "\n", encoding="utf-8")
+    print(f"report: wrote {args.out} ({len(reports)} samples)")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,11 +79,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     batch = sub.add_parser("batch", help="Audit a batch from a manifest")
     batch.add_argument("--manifest", required=True)
+    batch.add_argument("--control-dir", required=True, dest="control_dir")
+    batch.add_argument("--causal-dir", required=True, dest="causal_dir")
+    batch.add_argument("--attr-dir", required=True, dest="attr_dir")
     batch.add_argument("--out", required=True)
     batch.set_defaults(func=cmd_batch)
 
     validate = sub.add_parser("validate", help="Run the synthetic fault suite")
-    validate.add_argument("--suite", required=True)
+    validate.add_argument("--suite", required=False)
+    validate.add_argument("--n", type=int, default=40)
     validate.add_argument("--out", required=True)
     validate.set_defaults(func=cmd_validate)
 
