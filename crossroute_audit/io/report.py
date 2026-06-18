@@ -44,7 +44,7 @@ def plot_image_route_alignment(
         marker="s",
         label="CausalEffect (image)",
     )
-    ax.set_xlabel("LM-encoder layer")
+    ax.set_xlabel("Audit layer")
     ax.set_ylabel("z-score")
     ax.legend()
     ax.set_title(f"{title}  RankAlignment(image)={rho}")

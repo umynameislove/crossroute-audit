@@ -229,6 +229,10 @@ class BLIP2Adapter(ModelAdapter):
         self._ensure_loaded()
         return len(self._lm_encoder_layers())
 
+    def layer_axis_name(self) -> str:
+        """Return the BLIP-2 module path used as the audit layer axis."""
+        return "language_model.encoder.block"
+
     def prepare_attribution_inputs(
         self,
         inputs,

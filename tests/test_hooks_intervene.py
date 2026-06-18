@@ -68,7 +68,7 @@ class FakeInterventionAdapter(BLIP2Adapter):
             )
             hidden = torch.cat([hidden, padding], dim=1)
         attentions = []
-        for block in self.model.language_model.encoder.block:
+        for block in self._lm_encoder_layers():
             hidden = block(hidden)[0]
             sequence_length = hidden.shape[1]
             attention = torch.zeros(1, 1, sequence_length, sequence_length)
@@ -179,7 +179,7 @@ def test_activation_edit_behaviors_preserve_output_structure():
 def test_group_positions_and_ablation_use_adapter_token_groups():
     adapter = FakeInterventionAdapter()
     inputs = fake_inputs()
-    layer = adapter.model.language_model.encoder.block[0]
+    layer = adapter._lm_encoder_layers()[0]
 
     assert group_positions(adapter, inputs, "image") == (0, 1)
     assert group_positions(adapter, inputs, "text") == (2, 3)
@@ -206,7 +206,7 @@ def test_clean_corrupt_patching_restores_group_activation():
     clean_inputs = fake_inputs()
     corrupt_inputs = fake_inputs()
     corrupt_inputs["hidden_states"][:, :2, :] = 0.0
-    layer = adapter.model.language_model.encoder.block[1]
+    layer = adapter._lm_encoder_layers()[1]
 
     def target_logit(run_inputs):
         return adapter._run_first_decode_step(run_inputs, capture=False)[1][0, 1].item()
@@ -267,7 +267,7 @@ def test_noop_isolation_negative_control_and_target_metadata_on_fake_model():
     assert legacy_negative == pytest.approx(clean)
     assert all(
         len(layer._forward_hooks) == 0
-        for layer in adapter.model.language_model.encoder.block
+        for layer in adapter._lm_encoder_layers()
     )
 
 
@@ -290,7 +290,7 @@ def test_adapter_patch_mode_uses_clean_activation_on_corrupt_run():
     assert corrupt < patched <= clean
     assert all(
         len(layer._forward_hooks) == 0
-        for layer in adapter.model.language_model.encoder.block
+        for layer in adapter._lm_encoder_layers()
     )
 
 

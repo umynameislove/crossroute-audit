@@ -1,4 +1,4 @@
-"""Aggregate per-token attribution into image/text mass by LM layer."""
+"""Aggregate per-token attribution into image/text mass by audit layer."""
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -40,7 +40,7 @@ def attribution_mass_by_layer(
     token_groups,
     layer_count: int,
 ) -> dict[str, dict[int, float]]:
-    """Aggregate attribution on the causal LM-encoder layer axis.
+    """Aggregate attribution on the causal audit layer axis.
 
     ``token_attribution_by_layer`` must contain every zero-based layer in
     ``range(layer_count)``. Requiring the full axis prevents attribution and
