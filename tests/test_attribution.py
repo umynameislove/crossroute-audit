@@ -40,7 +40,7 @@ from crossroute_audit.model_adapters.blip2_adapter import BLIP2Adapter
 
 
 class TinyBlock(nn.Module):
-    """Tuple-returning block that mirrors the relevant T5Block contract."""
+    """Tuple-returning block that mirrors the tapped-layer output contract."""
 
     def __init__(self, hidden_size: int):
         super().__init__()
@@ -64,8 +64,10 @@ class TinyLanguageModel(nn.Module):
     def __init__(self, hidden_size: int = 3, layer_count: int = 2):
         super().__init__()
         self.encoder = nn.Module()
-        self.encoder.block = nn.ModuleList(
-            [TinyBlock(hidden_size) for _ in range(layer_count)]
+        setattr(
+            self.encoder,
+            "block",
+            nn.ModuleList([TinyBlock(hidden_size) for _ in range(layer_count)]),
         )
 
     def forward(
@@ -87,7 +89,7 @@ class TinyLanguageModel(nn.Module):
             use_cache,
         )
         hidden_states = inputs_embeds
-        for block in self.encoder.block:
+        for block in getattr(self.encoder, "block"):
             hidden_states = block(hidden_states)[0]
         masked = hidden_states * attention_mask.unsqueeze(-1).to(hidden_states.dtype)
         pooled = masked.sum(dim=(1, 2))
@@ -253,7 +255,7 @@ def test_layer_ig_runs_on_tiny_model_without_hook_leaks():
         assert result.completeness_residual < 1e-4
     assert all(
         len(block._forward_hooks) == 0
-        for block in adapter.model.language_model.encoder.block
+        for block in adapter._lm_encoder_layers()
     )
     assert {
         parameter.dtype
@@ -283,8 +285,8 @@ def test_attribution_artifact_and_secondary_method_share_contract():
     assert set(secondary) == {"image", "text"}
     assert set(primary["attribution_mass"]["image"]) == {"0", "1"}
     assert set(secondary["image"]) == {0, 1}
-    assert primary["settings"]["layer_axis"] == "language_model.encoder.block"
-    assert primary["settings"]["baseline"] == "blank_image_lm_encoder_embeddings"
+    assert primary["settings"]["layer_axis"] == adapter.layer_axis_name()
+    assert primary["settings"]["baseline"] == "blank_image_audit_embeddings"
     assert primary["settings"]["compute_dtype"] == "float32"
     assert contains_tensor(primary) is False
     assert all(
@@ -296,7 +298,7 @@ def test_attribution_artifact_and_secondary_method_share_contract():
 
 def test_attribution_layer_tap_is_removed_when_forward_fails():
     adapter = TinyAttributionAdapter()
-    block = adapter.model.language_model.encoder.block[0]
+    block = adapter._lm_encoder_layers()[0]
 
     with pytest.raises(RuntimeError, match="expected"):
         with adapter.attribution_layer_output(0):
@@ -398,7 +400,8 @@ def test_grad_forward_matches_clean_forward_on_tiny_blip2():
     assert differentiable[0].item() == pytest.approx(clean, abs=1e-6)
     assert gradient.shape == embeddings.shape
     assert torch.isfinite(gradient).all()
-    assert len(adapter.model.language_model.encoder._forward_pre_hooks) == 0
+    encoder = getattr(adapter.model.language_model, "encoder")
+    assert len(encoder._forward_pre_hooks) == 0
 
 
 def test_manifest_writer_is_deterministic_and_tensor_free(tmp_path):

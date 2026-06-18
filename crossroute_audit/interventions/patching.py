@@ -1,4 +1,4 @@
-"""Clean-corrupt activation patching in the LM encoder layer space."""
+"""Clean-corrupt activation patching in the adapter-defined audit layer space."""
 from __future__ import annotations
 
 from collections.abc import Callable

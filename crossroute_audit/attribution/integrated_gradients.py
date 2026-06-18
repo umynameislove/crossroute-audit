@@ -1,4 +1,4 @@
-"""Layer Integrated Gradients on BLIP-2 LM-encoder hidden states."""
+"""Layer Integrated Gradients on adapter-defined audit-layer hidden states."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -21,13 +21,12 @@ from crossroute_audit.metrics.attribution_mass import attribution_mass_by_layer
 
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "default.yaml"
 _SAFE_SAMPLE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
-_BASELINE_NAME = "blank_image_lm_encoder_embeddings"
-_LAYER_AXIS_NAME = "language_model.encoder.block"
+_BASELINE_NAME = "blank_image_audit_embeddings"
 
 
 @dataclass(frozen=True)
 class LayerIGAttribution:
-    """Serializable attribution summary for one LM-encoder layer."""
+    """Serializable attribution summary for one audit layer."""
 
     layer: int
     token_attribution: tuple[float, ...]
@@ -50,7 +49,7 @@ class LayerIGRun:
 class _AttributionContext:
     """Internal tensor context. It is never returned or serialized."""
 
-    encoder_embeddings: torch.Tensor
+    audit_embeddings: torch.Tensor
     baseline_embeddings: torch.Tensor
     attention_mask: torch.Tensor
     target_token_id: int
@@ -82,11 +81,11 @@ def layer_integrated_gradients(
     n_steps: int | None = None,
     internal_batch_size: int = 1,
 ) -> LayerIGAttribution:
-    """Return signed per-token Layer-IG attribution for one LM layer.
+    """Return signed per-token Layer-IG attribution for one audit layer.
 
     Hidden-dimension attributions are summed into one signed score per token.
     AttributionMass later applies ``sum(abs(token_score))`` over image and text
-    positions. The baseline is an all-zero LM-encoder embedding tensor.
+    positions. The baseline is provided by the adapter.
     """
     steps = load_ig_steps() if n_steps is None else _validate_ig_steps(n_steps)
     batch_size = _validate_internal_batch_size(internal_batch_size)
@@ -117,7 +116,7 @@ def layer_integrated_gradients_all_layers(
     n_steps: int | None = None,
     internal_batch_size: int = 1,
 ) -> LayerIGRun:
-    """Compute Layer-IG for every zero-based LM-encoder intervention layer."""
+    """Compute Layer-IG for every zero-based audit layer."""
     steps = load_ig_steps() if n_steps is None else _validate_ig_steps(n_steps)
     batch_size = _validate_internal_batch_size(internal_batch_size)
     layer_count = int(adapter.get_intervention_layer_count())
@@ -210,7 +209,7 @@ def build_attribution_mass_result(
             "groups": ["image", "text"],
             "ig_steps": run.ig_steps,
             "internal_batch_size": int(internal_batch_size),
-            "layer_axis": _LAYER_AXIS_NAME,
+            "layer_axis": adapter.layer_axis_name(),
             "layer_count": layer_count,
         },
     }
@@ -286,7 +285,7 @@ def _prepare_attribution_inputs(
     if not isinstance(prepared, tuple) or len(prepared) != 3:
         raise TypeError(
             "prepare_attribution_inputs must return "
-            "(encoder_embeddings, attention_mask, target_token_id)"
+            "(embeddings, attention_mask, target_token_id)"
         )
     return prepared
 
@@ -296,21 +295,21 @@ def _prepare_context(
     prepared: tuple[torch.Tensor, torch.Tensor, int],
     baseline_embeddings_raw: torch.Tensor,
 ) -> _AttributionContext:
-    encoder_embeddings, attention_mask, target_token_id = prepared
-    if not torch.is_tensor(encoder_embeddings) or encoder_embeddings.ndim != 3:
+    audit_embeddings, attention_mask, target_token_id = prepared
+    if not torch.is_tensor(audit_embeddings) or audit_embeddings.ndim != 3:
         raise ValueError(
-            "encoder embeddings must have shape [batch, sequence, hidden]"
+            "audit embeddings must have shape [batch, sequence, hidden]"
         )
-    if encoder_embeddings.shape[0] != 1:
+    if audit_embeddings.shape[0] != 1:
         raise ValueError("Layer-IG currently supports one sample at a time")
-    if not torch.is_tensor(attention_mask) or attention_mask.shape != encoder_embeddings.shape[:2]:
+    if not torch.is_tensor(attention_mask) or attention_mask.shape != audit_embeddings.shape[:2]:
         raise ValueError(
-            "attention mask must match encoder embedding batch and sequence dimensions"
+            "attention mask must match audit embedding batch and sequence dimensions"
         )
     target_token_id = int(target_token_id)
 
     clean_embeddings = (
-        encoder_embeddings.detach()
+        audit_embeddings.detach()
         .to(dtype=torch.float32)
         .requires_grad_(True)
     )
@@ -331,7 +330,7 @@ def _prepare_context(
         target_token_id,
     )
     return _AttributionContext(
-        encoder_embeddings=clean_embeddings,
+        audit_embeddings=clean_embeddings,
         baseline_embeddings=baseline_embeddings,
         attention_mask=attention_mask.detach(),
         target_token_id=target_token_id,
@@ -370,10 +369,10 @@ def _attribute_layer(
     layer_count = int(adapter.get_intervention_layer_count())
     if layer < 0 or layer >= layer_count:
         raise IndexError(
-            f"LM encoder layer {layer} is outside valid range [0, {layer_count - 1}]"
+            f"audit layer {layer} is outside valid range [0, {layer_count - 1}]"
         )
 
-    encoder_embeddings = context.encoder_embeddings.detach().requires_grad_(True)
+    audit_embeddings = context.audit_embeddings.detach().requires_grad_(True)
     baseline_embeddings = context.baseline_embeddings.detach()
     with adapter.attribution_layer_output(layer) as attribution_layer:
         algorithm = LayerIntegratedGradients(
@@ -382,7 +381,7 @@ def _attribute_layer(
             multiply_by_inputs=True,
         )
         attribution, convergence_delta = algorithm.attribute(
-            encoder_embeddings,
+            audit_embeddings,
             baselines=baseline_embeddings,
             additional_forward_args=(
                 context.attention_mask,
@@ -416,12 +415,12 @@ def _attribute_layer(
 
 def _scalar_forward(
     adapter,
-    encoder_embeddings: torch.Tensor,
+    embeddings: torch.Tensor,
     attention_mask: torch.Tensor,
     target_token_id: int,
 ) -> float:
     output = adapter.forward_target_logit_from_embeddings(
-        encoder_embeddings,
+        embeddings,
         attention_mask,
         target_token_id,
     )

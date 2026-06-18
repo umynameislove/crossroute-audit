@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import pytest
 
 from crossroute_audit.controls.baselines import (
@@ -31,6 +33,12 @@ class MockAdapter(ModelAdapter):
     def get_layer_count(self) -> int:
         return 1
 
+    def get_intervention_layer_count(self) -> int:
+        return 1
+
+    def layer_axis_name(self) -> str:
+        return "mock.audit_layers"
+
     def get_routing_proxy(self, inputs, layer: int):
         return {"layer": layer, "proxy": 1.0}
 
@@ -40,6 +48,28 @@ class MockAdapter(ModelAdapter):
 
     def get_target_logit(self, inputs, target_answer: str, policy: str) -> float:
         return self._logit_for_image(inputs["image"])
+
+    def prepare_attribution_inputs(self, inputs, target_answer: str, policy: str):
+        raise NotImplementedError
+
+    def attribution_baseline_embeddings(self, inputs):
+        raise NotImplementedError
+
+    def forward_target_logit_from_embeddings(
+        self,
+        embeddings,
+        attention_mask,
+        target_token_id: int,
+    ):
+        raise NotImplementedError
+
+    @contextmanager
+    def attribution_layer_output(self, layer: int):
+        yield None
+
+    @contextmanager
+    def attribution_float32(self):
+        yield
 
     def run_controls(self, inputs, sample: dict) -> dict:
         return run_controls(self, sample)

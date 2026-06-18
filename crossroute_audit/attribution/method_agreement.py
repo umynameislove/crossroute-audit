@@ -15,9 +15,9 @@ def gradient_x_activation_mass(
     target_answer: str,
     policy: str,
 ) -> dict[str, dict[int, float]]:
-    """Return secondary-method AttributionMass on the full LM layer axis.
+    """Return secondary-method AttributionMass on the full audit layer axis.
 
-    Gradient x activation uses the same fixed target token, LM-encoder layer
+    Gradient x activation uses the same fixed target token, audit layer
     outputs, token groups, and signed-token aggregation as Layer-IG. The method
     is intentionally lightweight enough to run on a small evidence subset.
     """

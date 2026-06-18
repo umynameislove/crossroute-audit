@@ -40,7 +40,7 @@ def causal_effect(clean_logit: float, intervened_logit: float) -> float:
 
 
 def causal_effect_by_layer(adapter, inputs, sample, group: str, mode: str = "ablate") -> dict:
-    """Return ``{layer_index: effect}`` for every LM-encoder intervention layer.
+    """Return ``{layer_index: effect}`` for every audit intervention layer.
 
     The target logit is resolved on the same ``inputs`` before interventions so
     clean and intervened logits refer to the same target token.

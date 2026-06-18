@@ -1,4 +1,4 @@
-"""Hidden-state ablation in the language-model encoder layer space."""
+"""Hidden-state ablation in the adapter-defined audit layer space."""
 from __future__ import annotations
 
 from collections.abc import Callable
