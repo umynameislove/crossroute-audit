@@ -34,6 +34,11 @@
       "minLength": 1,
       "description": "VQA / object-presence question. Keep it short with a clear target token; avoid open-ended phrasing."
     },
+    "question_type": {
+      "type": "string",
+      "enum": ["yes_no", "count", "color", "what", "where", "other"],
+      "description": "Rule-based question category used for balanced dataset sampling and result breakdowns."
+    },
     "target_answer": {
       "type": "string",
       "minLength": 1,
