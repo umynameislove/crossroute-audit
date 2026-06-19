@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import statistics
+from collections import Counter
 from pathlib import Path
 
 
@@ -77,3 +78,61 @@ def results_table(audit_reports: list[dict]) -> str:
             f"{_fmt(rank_alignment.get('image'))} | {_fmt(rank_alignment.get('text'))} |"
         )
     return "\n".join(lines)
+
+
+def multi_model_summary(reports_by_model: dict[str, list[dict]]) -> dict:
+    """Summarize image-route alignment and diagnoses for each model."""
+    summary = {}
+    for model, reports in reports_by_model.items():
+        image_rhos = [
+            report.get("rank_alignment", {}).get("image")
+            for report in reports
+        ]
+        defined_rhos = [rho for rho in image_rhos if rho is not None]
+        diagnosis_counts = Counter(
+            report["diagnosis"]["diagnosis"] for report in reports
+        )
+        summary[model] = {
+            "n": len(reports),
+            "median_rho": (
+                statistics.median(defined_rhos) if defined_rhos else None
+            ),
+            "frac_negative": (
+                sum(rho < 0 for rho in defined_rhos) / len(defined_rhos)
+                if defined_rhos
+                else None
+            ),
+            "diagnosis_counts": dict(diagnosis_counts),
+        }
+    return summary
+
+
+def comparison_table(summary: dict) -> str:
+    """Render a deterministic markdown comparison table for model summaries."""
+    lines = [
+        "| model | n | median ρ(image) | %âm | diagnosis nổi bật |",
+        "|---|---:|---:|---:|---|",
+    ]
+    for model, model_summary in summary.items():
+        median_rho = _fmt(model_summary["median_rho"])
+        frac_negative = model_summary["frac_negative"]
+        percent_negative = (
+            "None" if frac_negative is None else f"{100 * frac_negative:.3f}%"
+        )
+        lines.append(
+            f"| {model} | {model_summary['n']} | {median_rho} | "
+            f"{percent_negative} | "
+            f"{_top_diagnosis(model_summary['diagnosis_counts'])} |"
+        )
+    return "\n".join(lines)
+
+
+def _top_diagnosis(diagnosis_counts: dict[str, int]) -> str:
+    if not diagnosis_counts:
+        return "None"
+    highest_count = max(diagnosis_counts.values())
+    return min(
+        diagnosis
+        for diagnosis, count in diagnosis_counts.items()
+        if count == highest_count
+    )
