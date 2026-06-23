@@ -1,96 +1,47 @@
 # CrossRoute-Audit
 
-CrossRoute-Audit is a research framework for testing whether explanations in
-white-box vision-language models are faithful to the routes that actually drive
-a target answer.
+CrossRoute-Audit is a Python framework for auditing the **faithfulness of
+explanations in white-box vision-language models**. It compares where an
+attribution method assigns importance with where causal interventions show that
+visual or textual information actually affects a target answer.
 
-Attribution methods can tell us where a model appears to look. CrossRoute-Audit
-adds the missing check: do those attribution scores agree with causal
-interventions on the model's internal image/text routes?
+The framework is designed for reproducible research on VLM explanation
+faithfulness: adapter-based model support, schema-validated artifacts,
+control-gated diagnosis, synthetic validation, and paper-ready analysis tools.
 
-The project is built around a simple audit contract:
+## Core idea
 
-1. choose a target VQA answer token,
-2. measure attribution mass over image/text routes by layer,
-3. ablate or patch those same routes to estimate causal effect,
-4. compare the two signals with scale-invariant rank metrics,
-5. gate any diagnosis behind text-only, no-image, counterfactual, and negative
-   controls.
-
-The goal is not to claim that a model “reasons incorrectly.” The goal is to
-audit the faithfulness of explanation methods against causal evidence.
-
-## Why this exists
-
-Vision-language attribution maps are often used as evidence that a model relied
-on the image. That is a stronger claim than attribution alone can support.
-CrossRoute-Audit treats explanation faithfulness as an empirical question:
-
-> If visual information is causally important at certain layers, attribution
-> should rank those same layers as important.
-
-This framing makes the audit useful for:
-
-- checking whether attribution maps track causal routing rather than only visual
-  salience,
-- separating language-prior behavior from genuine visual grounding,
-- comparing explanation faithfulness across models, attribution methods, and
-  control conditions,
-- producing reproducible JSON artifacts that can be reviewed, validated, and
-  plotted without raw tensors.
-
-## Current capabilities
-
-The repository currently includes:
-
-- an adapter-based model interface for white-box VLM auditing,
-- BLIP-2, LLaVA, and InstructBLIP adapter implementations/tests,
-- Layer Integrated Gradients attribution over audit-layer activations,
-- image/text route ablation and activation-patching utilities,
-- control-gated diagnosis logic,
-- schema-validated manifest, control, causal, attribution, and audit-report
-  artifacts,
-- rank-alignment, structural-alignment, fusion, sensitivity, and statistical
-  metric helpers,
-- deterministic synthetic-fault validation,
-- dataset manifest builders for pilot and N=100 VQA-style evaluation,
-- final-analysis utilities for model comparison tables and paper-style figures.
-
-Some commands are intentionally artifact-oriented. The single-sample
-`crossroute audit` command is still a placeholder; the supported workflow is to
-generate or provide per-sample artifacts, then use batch/report/analysis tools to
-validate and summarize them.
-
-## Repository layout
+Attribution maps can show where a model appears to focus, but they do not prove
+that the highlighted route causally drove the answer. CrossRoute-Audit anchors
+explanation analysis with causal evidence:
 
 ```text
-crossroute_audit/
-  model_adapters/   White-box model adapter contract and VLM adapters
-  instrumentation/  Hooks, activation capture, and no-op controls
-  interventions/    Route ablation and clean/corrupt activation patching
-  controls/         Text-only, no-image, counterfactual, negative controls
-  attribution/      Layer IG, completeness checks, method agreement
-  metrics/          Rank, structure, causal, fusion, stats, sensitivity metrics
-  io/               Manifest loading, schema validation, reports, analysis
-  synthetic/        Synthetic fault generation and benchmark utilities
-  dashboard/        Read-only Streamlit artifact viewer
-  cli.py            `crossroute` command-line entry point
-
-data/manifest/      Example, pilot, and N=100 manifest files
-schemas/            JSON Schemas for public artifacts
-scripts/            Dataset, smoke-test, and final-analysis scripts
-tests/              Unit and integration-style test coverage
-docs/SPEC.md        MVP technical specification and claim boundary
+VQA sample
+  -> target answer logit
+  -> attribution mass by route/layer
+  -> causal route intervention by layer
+  -> rank/structural alignment metrics
+  -> control-gated diagnosis
 ```
 
-Images, model checkpoints, tensors, and run outputs are intentionally
-gitignored. The repository tracks code, schemas, manifests, tests, and lightweight
-metadata.
+The primary signal is **RankAlignment**: a Spearman rank correlation between
+layer-wise attribution mass and layer-wise causal effect on the same route. This
+keeps the audit scale-invariant and avoids treating attribution magnitude alone
+as evidence of faithfulness.
+
+## Features
+
+- Adapter contract for auditable white-box VLMs.
+- BLIP-2, LLaVA, and InstructBLIP adapter code/tests.
+- Layer Integrated Gradients attribution over audit-layer activations.
+- Route ablation and activation patching for causal effects.
+- Text-only, no-image, counterfactual, and negative-control gates.
+- Rank, structural, fusion, sensitivity, and statistical metric utilities.
+- JSON Schema validation for manifests and audit artifacts.
+- Synthetic fault benchmark for validating diagnosis logic.
+- Dataset manifest builders and final-analysis figure/table scripts.
 
 ## Installation
-
-Use Python 3.10 or newer. For development, an isolated virtual environment is
-recommended.
 
 ```bash
 git clone https://github.com/umynameislove/crossroute-audit.git
@@ -102,106 +53,38 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
-Optional dashboard dependencies:
+Optional dashboard support:
 
 ```bash
 python -m pip install -e ".[dev,dashboard]"
 ```
 
-The package exposes the `crossroute` console script after editable install.
+## Quick checks
 
 ```bash
-crossroute --help
+python -m pytest -q
+python -m crossroute_audit.io.manifest data/manifest/samples.example.jsonl
+python -m crossroute_audit.cli validate --out runs/synthetic_smoke --n 5
 ```
 
-If your shell cannot see the console script yet, the module form is equivalent:
+The CLI exposes artifact-oriented commands:
 
 ```bash
 python -m crossroute_audit.cli --help
 ```
 
-## Quick verification
-
-Run the test suite:
-
-```bash
-python -m pytest -q
-```
-
-Validate the example manifest:
-
-```bash
-python -m crossroute_audit.io.manifest data/manifest/samples.example.jsonl
-```
-
-Run a small deterministic synthetic benchmark:
-
-```bash
-crossroute validate --out runs/synthetic_smoke --n 5
-```
-
-or:
-
-```bash
-python -m crossroute_audit.cli validate --out runs/synthetic_smoke --n 5
-```
-
-The synthetic benchmark writes `benchmark.csv` under the chosen run directory and
-prints the measured accuracy over generated fault cases. These are logic tests;
-they are not a substitute for real model artifacts.
-
-## Data and manifests
-
-The manifest schema is defined in `schemas/manifest.schema.json`. Each line is a
-JSON object describing one audit sample.
-
-Required fields include:
-
-- `sample_id`
-- `image_path`
-- `question`
-- `target_answer`
-- `target_token_policy`
-- `expected_visual_dependency`
-- `text_only_answerable`
-- `control_type`
-- `notes`
-
-Useful manifest files:
-
-- `data/manifest/samples.example.jsonl` — tiny schema example,
-- `data/manifest/samples.jsonl` — pilot manifest,
-- `data/manifest/samples_n100.jsonl` — expanded VQA-style manifest.
-
-Images are not committed by default. Place image files at the paths referenced by
-the manifest before running GPU/model workflows.
-
-To regenerate or inspect the N=100-style manifest builder:
-
-```bash
-python scripts/build_n100_dataset.py --help
-```
-
-Unit tests for the builder do not download data:
-
-```bash
-python -m pytest tests/test_build_n100.py -q
-```
-
 ## Artifact workflow
 
-CrossRoute-Audit is designed around JSON artifacts so that expensive GPU work
-and lightweight analysis can be separated.
-
-Typical artifact families:
+CrossRoute-Audit separates GPU-heavy model runs from lightweight analysis.
+Per-sample runs produce JSON artifacts such as:
 
 - `control_status_<sample_id>.json`
 - `causal_effect_<sample_id>.json`
 - `attribution_mass_<sample_id>.json`
 - `audit_report_<sample_id>.json`
 
-After controls, causal effects, and attribution masses are available, combine
-them into per-sample audit reports:
+Once control, causal, and attribution artifacts exist, batch reports can be
+assembled with:
 
 ```bash
 crossroute batch \
@@ -210,15 +93,11 @@ crossroute batch \
   --causal-dir runs/causal \
   --attr-dir runs/attr \
   --out runs/audit
-```
 
-Render a Markdown summary table:
-
-```bash
 crossroute report --run runs/audit --out runs/report.md
 ```
 
-For final multi-model analysis and figures:
+Multi-model comparison and paper-style figures:
 
 ```bash
 python scripts/analyze_results.py \
@@ -226,123 +105,33 @@ python scripts/analyze_results.py \
   --out runs/figures
 ```
 
-The analysis script expects each model directory to contain matched
-`attr/attribution_mass_*.json` and `causal/causal_effect_*.json` files.
+## Repository layout
 
-## GPU smoke test
+```text
+crossroute_audit/
+  model_adapters/   Model adapter interface and VLM adapters
+  instrumentation/  Hooks and activation capture
+  interventions/    Route ablation and activation patching
+  controls/         Baseline/control gates
+  attribution/      Attribution and completeness utilities
+  metrics/          Faithfulness, structure, fusion, and stats metrics
+  io/               Manifest, schema, report, and analysis helpers
+  synthetic/        Synthetic fault benchmark
+  cli.py            Command-line interface
 
-The BLIP-2 smoke script is meant for a machine with the required model weights
-and enough GPU memory.
-
-```bash
-python scripts/smoke_blip2.py \
-  --image data/images/example.jpg \
-  --question "Is there a dog in the image?" \
-  --target yes \
-  --device cuda
+data/manifest/      Example and evaluation manifests
+schemas/            JSON Schemas for artifacts
+scripts/            Dataset and analysis scripts
+tests/              Test suite
+docs/SPEC.md        Technical specification
 ```
 
-It prints model metadata, target logit, token-group sizes, and captured
-tensor-free summaries. This is a smoke check, not a full audit.
+## Research scope
 
-## Core metrics
-
-The primary metric is RankAlignment: Spearman correlation between attribution
-mass and causal effect on the same route/layer axis.
-
-Additional metric families include:
-
-- structural alignment: detrended rank alignment and top-k overlap,
-- non-parametric statistics: bootstrap confidence intervals, Cliff's delta,
-  sign test, Holm-Bonferroni, Benjamini-Hochberg,
-- fusion score: combines alignment, completeness, and control cleanliness,
-- sensitivity/adversarial utilities for deterministic stress testing.
-
-Metric design principle: attribution magnitude alone is not treated as evidence
-of faithfulness. Attribution is interpreted only in relation to causal effects
-and control gates.
-
-## Development workflow
-
-Install development dependencies:
-
-```bash
-python -m pip install -e ".[dev]"
-```
-
-Run focused tests while editing:
-
-```bash
-python -m pytest tests/test_rank_alignment.py -q
-python -m pytest tests/test_structure_align.py -q
-python -m pytest tests/test_cli.py -q
-```
-
-Run the full suite before opening a PR:
-
-```bash
-python -m pytest -q
-```
-
-Check the working tree:
-
-```bash
-git status --short
-git diff --stat
-```
-
-## Contributing
-
-This repository uses a branch-and-review workflow:
-
-1. create a branch from the latest `main`,
-2. keep changes scoped and reviewable,
-3. run the relevant tests and full test suite,
-4. open a pull request into `main`,
-5. wait for review and merge by the repository lead.
-
-Recommended branch examples:
-
-```bash
-git fetch origin
-git checkout -b docs/readme-refresh origin/main
-```
-
-or, if you already have an up-to-date local `main`:
-
-```bash
-git checkout main
-git pull origin main
-git checkout -b docs/readme-refresh
-```
-
-Use commit authorship that is connected to your GitHub account. For example:
-
-```bash
-git config user.name "Bu0308"
-git config user.email "187178852+Bu0308@users.noreply.github.com"
-```
-
-To check the author that Git will use:
-
-```bash
-git config --get user.name
-git config --get user.email
-```
-
-For GitHub contribution credit, the commit author email must be associated with
-your GitHub account, and the branch must eventually be merged into the default
-branch of a non-fork repository. A normal merge commit preserves the original
-commit author; squash merges may rewrite the final commit metadata depending on
-how the maintainer merges.
-
-## Citation and research status
-
-CrossRoute-Audit is an active research codebase. The current repository is meant
-to make explanation-faithfulness audits reproducible, inspectable, and easier to
-extend across white-box VLMs. If you use it in research, cite the repository and
-include the exact commit hash, manifest, model checkpoint, and generated
-artifacts used in your run.
+CrossRoute-Audit evaluates explanation faithfulness, not whether a model
+“reasons correctly.” Layer-wise claims require white-box access to model
+activations and interventions. Raw tensors, checkpoints, images, and run outputs
+are intentionally excluded from version control.
 
 ## License
 
