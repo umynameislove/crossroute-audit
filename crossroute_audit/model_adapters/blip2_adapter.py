@@ -474,34 +474,37 @@ class BLIP2Adapter(ModelAdapter):
                 self._attribution_float32_depth -= 1
             return
 
-        parameter_dtypes = {
-            parameter.dtype
-            for parameter in language_model.parameters()
-            if parameter.is_floating_point()
-        }
-        if not parameter_dtypes:
+        parameters = tuple(language_model.parameters())
+        if not any(parameter.is_floating_point() for parameter in parameters):
             raise RuntimeError(
                 "language model has no floating-point parameters for attribution"
             )
-        if len(parameter_dtypes) != 1:
-            dtypes = ", ".join(sorted(str(dtype) for dtype in parameter_dtypes))
-            raise RuntimeError(
-                "attribution requires one language-model parameter dtype; "
-                f"found {dtypes}"
-            )
 
-        original_dtype = next(iter(parameter_dtypes))
-        parameters = tuple(language_model.parameters())
+        # Some encoder-decoder backbones (e.g. Flan-T5) deliberately keep select
+        # modules in float32 via ``_keep_in_fp32_modules`` (notably the ``wo``
+        # projections), so the language model can legitimately hold a *mix* of
+        # dtypes. Record each parameter's original dtype and restore it
+        # per-parameter instead of assuming one uniform dtype.
+        original_dtypes = tuple(parameter.dtype for parameter in parameters)
         original_requires_grad = tuple(
             parameter.requires_grad for parameter in parameters
         )
-        converted = original_dtype != torch.float32
+        converted = any(
+            parameter.is_floating_point() and parameter.dtype != torch.float32
+            for parameter in parameters
+        )
+
+        def _restore_dtypes() -> None:
+            for parameter, dtype in zip(parameters, original_dtypes):
+                if parameter.is_floating_point() and parameter.dtype != dtype:
+                    parameter.data = parameter.data.to(dtype=dtype)
+
         try:
             if converted:
                 language_model.to(dtype=torch.float32)
         except Exception:
             if converted:
-                language_model.to(dtype=original_dtype)
+                _restore_dtypes()
             raise
 
         for parameter in parameters:
@@ -519,7 +522,7 @@ class BLIP2Adapter(ModelAdapter):
             ):
                 parameter.requires_grad_(requires_grad)
             if converted:
-                language_model.to(dtype=original_dtype)
+                _restore_dtypes()
 
     @contextmanager
     def attribution_layer_output(self, layer: int):
