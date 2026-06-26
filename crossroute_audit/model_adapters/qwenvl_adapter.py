@@ -46,6 +46,11 @@ class QwenVLAdapter(LLaVAAdapter):
 
     name = "qwenvl"
 
+    # Qwen2-VL is numerically unstable in float16 (attention/activation overflow
+    # past fp16's ~65504 range -> NaN logits on the clean forward). bfloat16
+    # shares float32's exponent range, so use it for both weights and inputs.
+    COMPUTE_DTYPE = torch.bfloat16
+
     def __init__(
         self,
         model_name: str = "Qwen/Qwen2-VL-7B-Instruct",
@@ -99,7 +104,7 @@ class QwenVLAdapter(LLaVAAdapter):
         for key, value in encoded.items():
             if torch.is_tensor(value):
                 if value.is_floating_point():
-                    value = value.to(device=self.device, dtype=torch.float16)
+                    value = value.to(device=self.device, dtype=self.COMPUTE_DTYPE)
                 else:
                     value = value.to(device=self.device)
             prepared[key] = value
@@ -191,7 +196,7 @@ class QwenVLAdapter(LLaVAAdapter):
         processor = AutoProcessor.from_pretrained(self.model_name)
         model = Qwen2VLForConditionalGeneration.from_pretrained(
             self.model_name,
-            torch_dtype=torch.float16,
+            torch_dtype=self.COMPUTE_DTYPE,
             attn_implementation="eager",
         )
         model = model.to(self.device)
